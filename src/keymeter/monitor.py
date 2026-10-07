@@ -132,6 +132,11 @@ def derive_status(snap):
     return "OK"
 
 
+def csv_text(s):
+    """Keep spreadsheet apps from running gateway text as a formula (CSV injection)."""
+    return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
+
+
 def team_from_message(msg):
     m = re.search(r"Team=([^\s,]+)", msg or "")
     return m.group(1) if m else None
@@ -274,7 +279,7 @@ class Monitor:
                             "team_max_budget", "key_burn_per_hour", "latency_ms", "message"])
             w.writerow(tidy([iso(snap.ts), snap.status, snap.key.get("spend"), snap.key.get("max_budget"),
                              snap.team.get("spend"), snap.team.get("max_budget"),
-                             rate, round(snap.latency_ms), snap.message]))
+                             rate, round(snap.latency_ms), csv_text(snap.message)]))
 
     # -- derived numbers
 

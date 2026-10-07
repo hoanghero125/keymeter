@@ -86,7 +86,12 @@ def main(argv=None):
             stream.reconfigure(encoding="utf-8")
     args = build_parser().parse_args(argv)
     args.interval = max(args.interval, 1)
-    load_env(Path(args.env) if args.env else Path(".env"), required=bool(args.env))
+    if args.env:
+        load_env(Path(args.env), required=True)
+    elif not os.environ.get("KEYMETER_KEY"):
+        # ./.env is only a fallback for the key itself: a .env in whatever directory you are in (a cloned
+        # repo, say) must not point a key from your environment at another server
+        load_env(Path(".env"), required=False)
     key = os.environ.get("KEYMETER_KEY", "").strip().strip('"')
     if not key:
         sys.exit("KEYMETER_KEY is not set. Put it in a .env file in this directory, pass --env FILE, or export it.")

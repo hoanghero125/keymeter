@@ -189,3 +189,11 @@ def test_zero_budget_is_a_budget(args):
 def test_runs_out_now_when_budget_is_used_up(args):
     ki = run(args, ok(T0, spend=9.0, max_budget=10), ok(T0 + 600, spend=10.0, max_budget=10)).summary()["key_info"]
     assert ki["burn_per_hour"] > 0 and ki["runs_out_in_s"] == 0
+
+
+def test_csv_log_defuses_formulas(args, tmp_path):
+    args.log = str(tmp_path / "polls.csv")
+    run(args, Snapshot(T0, "HTTP 500", '=HYPERLINK("http://x.invalid","click")'))
+    with open(args.log, newline="", encoding="utf-8") as f:
+        row = list(csv.reader(f))[1]
+    assert row[-1] == "'" + '=HYPERLINK("http://x.invalid","click")'

@@ -92,6 +92,10 @@ current directory (or the file given with `--env`):
 Copy [`.env.example`](.env.example) to `.env` to start. There is no `--key` option, because a key
 typed on the command line ends up in your shell history.
 
+When `KEYMETER_KEY` is already set in the environment, keymeter ignores `./.env` (but still reads a
+file you name with `--env`). That way a `.env` in whatever directory you happen to be in, such as a
+cloned repository, can't send your key to another server.
+
 ## What each gateway reports
 
 | | LiteLLM | OpenRouter |

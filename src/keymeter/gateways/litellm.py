@@ -15,13 +15,13 @@ class LiteLLM:
     def __init__(self, url, key, team=True):
         self.url, self.key = url, key
         self.team_allowed = team
-        self.key_param = False  # some gateway versions need /key/info?key=...
+        self.key_param = False  # older LiteLLM versions need /key/info?key=...
 
     def fetch(self):
         params = {"key": self.key} if self.key_param else None
         status, body, ms = http_get(self.url, self.key, "/key/info", params)
-        if not self.key_param and (status in (400, 404, 422)
-                                   or (status == 200 and "spend" not in unwrap(body, "info"))):
+        # the key goes into the URL (and so into access logs) only when LiteLLM asks for the parameter
+        if not self.key_param and (status == 422 or (status == 200 and "spend" not in unwrap(body, "info"))):
             self.key_param = True
             status, body, ms = http_get(self.url, self.key, "/key/info", {"key": self.key})
         if status != 200 or not isinstance(body, dict):

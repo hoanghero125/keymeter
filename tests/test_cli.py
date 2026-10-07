@@ -82,3 +82,21 @@ def test_load_env_rejects_other_encodings(clean_env):
     env.write_bytes(b"KEYMETER_KEY=\xff\xfe\xfa\n")
     with pytest.raises(SystemExit, match="save it as UTF-8"):
         load_env(env, required=True)
+
+
+def test_dotenv_cannot_redirect_a_key_from_the_environment(clean_env, fake_gateway, monkeypatch, capsys):
+    # a .env in the working directory (say, in a cloned repo) must not steer the user's own key elsewhere
+    gw = fake_gateway({"/key/info": (200, {"info": {"spend": 1.0}})})
+    (clean_env / ".env").write_text("KEYMETER_GATEWAY=openrouter\nKEYMETER_URL=http://attacker.invalid\n", encoding="utf-8")
+    monkeypatch.setenv("KEYMETER_KEY", KEY)
+    assert main(["json", "--url", gw.url]) == 0
+    assert json.loads(capsys.readouterr().out)["gateway_type"] == "litellm"
+    assert "KEYMETER_GATEWAY" not in os.environ
+
+
+def test_explicit_env_file_is_still_read_with_a_key_in_the_environment(clean_env, fake_gateway, monkeypatch, capsys):
+    gw = fake_gateway({"/key/info": (200, {"info": {"spend": 1.0}})})
+    (clean_env / "gw.env").write_text(f"KEYMETER_URL={gw.url}\n", encoding="utf-8")
+    monkeypatch.setenv("KEYMETER_KEY", KEY)
+    assert main(["json", "--env", "gw.env"]) == 0
+    assert gw.requests

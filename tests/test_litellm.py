@@ -1,6 +1,7 @@
 import socket
 import threading
 
+import pytest
 from conftest import KEY
 
 from keymeter.gateways.litellm import LiteLLM
@@ -16,8 +17,12 @@ def test_reads_wrapped_key_info(fake_gateway):
     assert gw.requests == [("/key/info", {}, f"Bearer {KEY}")]
 
 
+MISSING_KEY = (422, {"detail": [{"loc": ["query", "key"], "msg": "field required", "type": "value_error.missing"}]})
+
+
 def test_falls_back_to_key_param_and_remembers_it(fake_gateway):
-    gw = fake_gateway({"/key/info": lambda q: (200, {"info": INFO}) if q.get("key") == KEY else (404, {"detail": "nope"})})
+    # older LiteLLM versions require /key/info?key=... and answer 422 without it
+    gw = fake_gateway({"/key/info": lambda q: (200, {"info": INFO}) if q.get("key") == KEY else MISSING_KEY})
     adapter = LiteLLM(gw.url, KEY)
     assert adapter.fetch().key == INFO
     assert adapter.fetch().key == INFO
@@ -89,3 +94,10 @@ def test_non_http_answer_is_offline():
     srv.close()
     assert snap.status == "OFFLINE"
     assert snap.message.startswith("network error:")
+
+
+@pytest.mark.parametrize("status", [400, 401, 404])
+def test_never_puts_the_key_in_the_url_otherwise(fake_gateway, status):
+    gw = fake_gateway({"/key/info": (status, {"detail": "Not Found"})})
+    LiteLLM(gw.url, KEY).fetch()
+    assert [q for _, q, _ in gw.requests] == [{}]
