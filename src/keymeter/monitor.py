@@ -277,8 +277,9 @@ class Monitor:
             if new:
                 w.writerow(["time", "status", "key_spend", "key_max_budget", "team_spend",
                             "team_max_budget", "key_burn_per_hour", "latency_ms", "message"])
-            w.writerow(tidy([iso(snap.ts), snap.status, snap.key.get("spend"), snap.key.get("max_budget"),
-                             snap.team.get("spend"), snap.team.get("max_budget"),
+            # gateway values go through num(), so only numbers reach the number columns
+            w.writerow(tidy([iso(snap.ts), snap.status, num(snap.key.get("spend")), num(snap.key.get("max_budget")),
+                             num(snap.team.get("spend")), num(snap.team.get("max_budget")),
                              rate, round(snap.latency_ms), csv_text(snap.message)]))
 
     # -- derived numbers

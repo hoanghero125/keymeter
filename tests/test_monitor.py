@@ -143,7 +143,7 @@ def test_csv_log(args, tmp_path):
         rows = list(csv.reader(f))
     assert rows[0][:3] == ["time", "status", "key_spend"]
     assert [r[1] for r in rows[1:]] == ["OK", "OFFLINE"]
-    assert rows[1][2:4] == ["1.0", "10"]
+    assert rows[1][2:4] == ["1.0", "10.0"]
 
 
 class Broken:
@@ -197,3 +197,13 @@ def test_csv_log_defuses_formulas(args, tmp_path):
     with open(args.log, newline="", encoding="utf-8") as f:
         row = list(csv.reader(f))[1]
     assert row[-1] == "'" + '=HYPERLINK("http://x.invalid","click")'
+
+
+def test_csv_log_writes_only_numbers_in_number_columns(args, tmp_path):
+    args.log = str(tmp_path / "polls.csv")
+    formula = '=HYPERLINK("http://x.invalid","click")'
+    snap = Snapshot(T0, "OK", key={"spend": formula, "max_budget": "@SUM(1)"}, team={"spend": "+1+1", "max_budget": "50"})
+    run(args, snap)
+    with open(args.log, newline="", encoding="utf-8") as f:
+        row = list(csv.reader(f))[1]
+    assert row[2:6] == ["", "", "", "50.0"]
