@@ -12,8 +12,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
       - run: uv run --locked ruff check
       - name: Check the dashboard script parses
         run: node --check src/keymeter/static/app.js
@@ -29,8 +29,8 @@ jobs:
           - { os: macos-latest, python: "3.14" }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: ${{ matrix.python }}
       - run: uv run --locked pytest
