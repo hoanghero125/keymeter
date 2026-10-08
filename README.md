@@ -17,7 +17,8 @@ endpoint (no tokens spent) and shows:
 - the burn rate over the last 15 minutes, when the budget runs out at that rate, and the projected
   spend at reset
 - charts of spend over time and spend per interval, with a table view
-- spend per model and per-model budgets, rate limits, allowed models, expiry and blocked state (LiteLLM)
+- the key's expiry, and on LiteLLM spend per model, per-model budgets, rate limits, allowed models and
+  blocked state
 - an event log, and optional sound and desktop alerts when the status changes or a budget passes 80%
   or 95%
 
@@ -48,11 +49,13 @@ export KEYMETER_KEY=sk-or-v1-...
 keymeter web
 ```
 
-Then open <http://localhost:8765>. keymeter recognises OpenRouter from the `sk-or-` key or an
-`openrouter.ai` URL, so it needs no URL there.
+Then open <http://localhost:8765>. keymeter picks the gateway by itself: OpenRouter when the URL's
+host is `openrouter.ai` or a subdomain of it, or, if no URL is set, when the key starts with `sk-or-`;
+LiteLLM otherwise.
+So OpenRouter needs no URL, and a bare `https://openrouter.ai` works too.
 
 On Windows PowerShell, set the variables with `$env:KEYMETER_KEY = "sk-..."`. You can also put
-them in a `.env` file instead (see [Configuration](#configuration)).
+them in a `.env` file instead (see [Configuration](https://github.com/hoanghero125/keymeter#configuration)).
 
 ## Commands
 
@@ -60,16 +63,16 @@ them in a `.env` file instead (see [Configuration](#configuration)).
 |---|---|
 | `keymeter web` | browser dashboard on <http://localhost:8765> |
 | `keymeter tui` | live dashboard in the terminal; on LiteLLM it also shows the team's budget and keys when the key may read them |
-| `keymeter tui --once` | print one snapshot and exit |
-| `keymeter json` | print one snapshot as JSON and exit with code 1 when the key is not usable, for scripts and cron jobs |
+| `keymeter tui --once` | print one snapshot and exit; exits with code 1 when the status is not OK, like `json` |
+| `keymeter json` | print one snapshot as JSON, for scripts and cron jobs; exits with code 1 when the status is not OK (the key or its team over budget or blocked, the key expired, or the gateway unreachable or answering with an error) |
 
 Options (`keymeter COMMAND -h` lists them per command):
 
 | Option | Default | |
 |---|---|---|
-| `--gateway` | `auto` | `litellm`, `openrouter`, or `auto` to pick from the URL and key |
-| `--url` | depends on the gateway | gateway base URL; `http://localhost:4000` for LiteLLM, `https://openrouter.ai/api` for OpenRouter. A trailing `/v1` is fine. |
-| `--env FILE` | `.env` | where to read settings from |
+| `--gateway` | `auto` | `litellm`, `openrouter`, or `auto` to pick from the URL's host, or from the key when no URL is set |
+| `--url` | depends on the gateway | gateway base URL; `http://localhost:4000` for LiteLLM, `https://openrouter.ai/api` for OpenRouter. A trailing `/v1` is fine, and so is a bare `https://openrouter.ai`. |
+| `--env FILE` | `.env` | where to read settings from; `./.env` is skipped when `KEYMETER_KEY` is already set in the environment |
 | `-i`, `--interval` | `15` | seconds between polls (`web`, `tui`) |
 | `--window` | `15` | burn-rate window in minutes (`web`, `tui`) |
 | `--warn` / `--crit` | `0.8` / `0.95` | alert thresholds, as a fraction of a budget (`web`, `tui`) |
@@ -81,7 +84,7 @@ Options (`keymeter COMMAND -h` lists them per command):
 ## Configuration
 
 keymeter reads three settings, from the environment first and then from a `.env` file in the
-current directory (or the file given with `--env`):
+current directory (or the file given with `--env`). An empty variable counts as unset.
 
 | Variable | |
 |---|---|
@@ -89,12 +92,17 @@ current directory (or the file given with `--env`):
 | `KEYMETER_URL` | gateway base URL |
 | `KEYMETER_GATEWAY` | `auto`, `litellm` or `openrouter` |
 
-Copy [`.env.example`](.env.example) to `.env` to start. There is no `--key` option, because a key
-typed on the command line ends up in your shell history.
+Copy [`.env.example`](https://github.com/hoanghero125/keymeter/blob/main/.env.example) to `.env` to start.
+keymeter reads `./.env` only when `KEYMETER_KEY` is not set in the environment (a file you name with
+`--env` is always read). That way a `.env` in whatever directory you happen to be in, such as a cloned
+repository, can't send your key to another server.
 
-When `KEYMETER_KEY` is already set in the environment, keymeter ignores `./.env` (but still reads a
-file you name with `--env`). That way a `.env` in whatever directory you happen to be in, such as a
-cloned repository, can't send your key to another server.
+There is no `--key` option, because a key typed on the command line ends up in your shell history.
+
+The file's other `NAME=value` lines go into keymeter's environment too (a variable already set there
+wins unless it is empty). Python's HTTP client takes its proxy from the environment, so `HTTPS_PROXY`,
+`HTTP_PROXY` or `NO_PROXY` in the file apply to the requests to the gateway, and a proxy set that way
+can read the key when the gateway URL is plain `http://`. Pass `--env` only files you trust.
 
 ## What each gateway reports
 
@@ -105,6 +113,10 @@ cloned repository, can't send your key to another server.
 | Spend per model, per-model budgets | yes | no |
 | Rate limits, allowed models, blocked state | yes | no |
 | Team budget and team keys (`tui`, `json`) | yes | no |
+
+keymeter shows how much of a per-model budget is used only on LiteLLM 1.90 or newer, which reports
+the spend in each budget's period. Older versions report only all-time spend per model, so keymeter
+shows the limit alone, with no percentage and no alerts.
 
 On OpenRouter the budget is the key's credit limit. The spend shown is what counts against that limit
 in the current period. Limits reset at 00:00 UTC: daily, weekly on Monday, or on the 1st of the month.
@@ -125,8 +137,10 @@ ssh -N -L 8765:localhost:8765 you@server
 Then open <http://localhost:8765> on the laptop. Because the browser sees `localhost`, desktop
 notifications work as well (browsers only allow them over HTTPS or on localhost).
 
-On `127.0.0.1`, keymeter answers only requests addressed to `localhost`, so other websites can't read
-it through DNS rebinding. A reverse proxy in front of it has to send `Host: localhost`.
+On `127.0.0.1`, keymeter answers only requests whose `Host` header is `localhost`, `127.0.0.1` or
+`[::1]` (with any port), or that have no `Host` header. This stops another website from reading the
+dashboard through DNS rebinding. A reverse proxy in front of it has to send one of those, such as
+`Host: localhost`.
 
 To keep it running after you log out, use `tmux`, a systemd service, or
 `nohup keymeter web > keymeter.log 2>&1 &`.
@@ -147,8 +161,11 @@ itself) and press "Poll now". If you do this, allow only your own IP in the fire
   `--log` to keep a permanent record.
 - The bell button in the browser turns on alerts: a short sound, plus a desktop notification when
   the browser allows it.
-- The web UI fades things in and out as they change, and keeps still if your system asks for reduced
-  motion.
+- In the web UI, switching the theme, the range, between chart and table view, or alerts on and off
+  crossfades. When new data arrives, the big numbers count to their new value and the bars and charts
+  glide instead of jumping; status banners fade in and out, and the dashboard fades in when it replaces
+  the "No quota data yet" card. With reduced motion turned on in your system, only the looping spinner
+  and pulse stop.
 
 ## Development
 
@@ -167,20 +184,20 @@ The web UI is plain HTML, CSS and JavaScript in `src/keymeter/static`, with no b
 
 To support another gateway, add an adapter in `src/keymeter/gateways/`. It fetches the key's data
 and translates it into the field names the rest of keymeter uses (LiteLLM's); see `openrouter.py`
-for a small example.
+for a small example. Then register it in `gateways/__init__.py`: add it to `GATEWAYS` and to
+`create()`, which builds the adapter, and to `detect()` if `auto` should pick it.
 
 ### Releasing
 
 1. Set `__version__` in `src/keymeter/__init__.py` and add the release to `CHANGELOG.md`.
-2. Commit, then tag and push: `git tag v0.1.0 && git push origin v0.1.0`.
+2. Commit and tag, then push the commit and the tag together: `git tag v0.1.1 && git push origin main v0.1.1`.
 
-The `Release` workflow tests and builds the package, then publishes it to PyPI. Before the first
-release, set up trusted publishing once:
-
-- On PyPI, under *Your account → Publishing*, add a pending publisher with project `keymeter`,
-  owner `hoanghero125`, repository `keymeter`, workflow `release.yml` and environment `pypi`.
-- On GitHub, under *Settings → Environments*, create an environment named `pypi`.
+The `Release` workflow tests and builds the package, then publishes it to PyPI with trusted
+publishing, so no API token is involved. The trusted publisher (on PyPI, under the project's
+*Manage → Publishing*) names owner `hoanghero125`, repository `keymeter`, workflow `release.yml` and
+environment `pypi`, the GitHub environment the workflow runs in. If you rename the workflow file or
+the environment, update the publisher to match.
 
 ## License
 
-[MIT](LICENSE). keymeter is not affiliated with LiteLLM (BerriAI) or OpenRouter.
+[MIT](https://github.com/hoanghero125/keymeter/blob/main/LICENSE). keymeter is not affiliated with LiteLLM (BerriAI) or OpenRouter.

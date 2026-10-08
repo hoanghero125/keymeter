@@ -20,7 +20,6 @@ const GATEWAY_NAME = { litellm: 'LiteLLM', openrouter: 'OpenRouter' };
 const S = {
   boot: null, version: -1, data: null, history: [], offset: 0,
   serverOk: null, bellSeq: null, pollPending: false, bannerKey: null, favicon: null,
-  status: null, lastEventTs: 0, meters: new Map(), themeTimer: 0,
   range: load('keymeter-range', '1h'), theme: load('keymeter-theme', 'auto'), alerts: load('keymeter-alerts', 'off') === 'on',
 };
 let charts, audio;
@@ -65,15 +64,19 @@ const dim = text => h('span', { class: 'dim', text });
 const withIcon = (cls, ic, ...kids) => h('span', { class: `with-icon ${cls}` }, icon(ic), ...kids);
 const nowS = () => Date.now() / 1000 + S.offset;  // server clock
 
-// ---------------------------------------------------------------- fades
-// Only real transitions fade (something appears, disappears or is switched by the user), never the
-// redraw every poll triggers, so the page doesn't flicker. Nothing animates under reduced motion.
+// ---------------------------------------------------------------- motion
+// Switches the user makes (theme, range, chart or table view) crossfade the page. New data never
+// flashes: the big tile numbers count to their new value, bars slide, and the charts glide from the
+// shape on screen to the new one. Banners and the dashboard itself fade in and out. These are short,
+// one-off movements, so they stay on under reduced motion; styles.css stops only the looping ones.
 
-const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const MOVE_MS = 700;
+const easeOut = p => 1 - (1 - p) ** 3;
+const lerp = (a, b, p) => a + (b - a) * p;
 const fadingOut = new WeakSet();
 
 function fadeIn(el, ms = 220) {
-  if (!reduceMotion.matches) el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: ms, easing: 'ease-out' });
+  el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: ms, easing: 'ease-out' });
 }
 
 // Show or hide `el` with a fade. A hidden element keeps its content until the fade-out finishes.
@@ -84,13 +87,64 @@ function setShown(el, show) {
   if (show) {
     el.hidden = false;
     fadeIn(el);
-  } else if (reduceMotion.matches) {
-    el.hidden = true;
   } else {
     fadingOut.add(el);
     el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 180, easing: 'ease-in' }).finished
       .then(() => { if (fadingOut.delete(el)) el.hidden = true; }, () => { /* cancelled: shown again */ });
   }
+}
+
+// Apply a UI switch as a crossfade of the whole page; browsers without View Transitions switch at once.
+function crossfade(update) {
+  if (document.startViewTransition) document.startViewTransition(update);
+  else update();
+}
+
+// Call frame(p) now and on every animation frame, p easing from 0 to 1 over MOVE_MS. Starting again
+// cancels the run still going for the same owner.
+function tween(owner, frame) {
+  cancelAnimationFrame(owner.raf);
+  const t0 = performance.now();
+  frame(0);
+  const step = now => {
+    const p = Math.min(Math.max((now - t0) / MOVE_MS, 0), 1);
+    frame(easeOut(p));
+    if (p < 1) owner.raf = requestAnimationFrame(step);
+  };
+  owner.raf = requestAnimationFrame(step);
+}
+
+// Big tile numbers count from what they showed to the new value. `dir` 'down' or 'up' makes a duration
+// that keeps moving with the clock afterwards (the per-second ticker repaints it).
+const counters = new Map();  // name -> counter
+
+function counter(name, base, fmt, dir = null) {
+  const old = counters.get(name);
+  const from = old?.el.isConnected && base != null ? old.shown : null;  // count on only from a value still on screen, to one
+  const c = { el: h('span', { class: 'counter' }), base, at: S.data.summary_time, dir, raf: 0, p: 1 };
+  const target = () => {
+    const age = nowS() - c.at;
+    return dir === 'down' ? Math.max(base - age, 0) : dir === 'up' ? base + age : base;
+  };
+  c.paint = p => {
+    c.p = p;
+    c.shown = from == null ? target() : lerp(from, target(), p);
+    c.el.textContent = fmt(c.shown);
+  };
+  counters.set(name, c);
+  if (from == null) c.paint(1); else tween(c, c.paint);
+  return c.el;
+}
+
+// A meter or share bar: it slides from the width it had at the last render (CSS transition on width).
+const widths = new Map();  // key -> % at the last render
+
+function slide(el, key, pct) {
+  const w = Math.min(Math.max(pct, 0), 100), was = widths.get(key);
+  widths.set(key, w);
+  el.style.width = `${was ?? w}%`;
+  if (was != null && was !== w) requestAnimationFrame(() => { void el.offsetWidth; el.style.width = `${w}%`; });
+  return el;
 }
 
 // ---------------------------------------------------------------- formatting (mirrors keymeter/util.py)
@@ -145,12 +199,34 @@ const statusInfo = st => STATUS[st] || ['critical', 'octagon-x'];
 
 // ---------------------------------------------------------------- data loop
 
+// Fetch `url` and parse its JSON answer. It fails once it has waited 5s for the answer or for the next chunk of
+// its body, so a half-open connection can't stall the loop. The timer restarts on every chunk rather than timing
+// the whole body: the first /api/state carries 24h of history, which a slow link takes a while to read. A body
+// that trickles in still ends: each minute it must bring 60 KB (1 KB/s), far below any real link.
+async function request(url, opts) {
+  const ac = new AbortController();
+  let timer, got = 0;
+  const arm = () => { clearTimeout(timer); timer = setTimeout(() => ac.abort(), 5000); };
+  const trickle = setInterval(() => { if (got < 60000) ac.abort(); got = 0; }, 60000);
+  arm();
+  try {
+    const r = await fetch(url, { ...opts, signal: ac.signal });
+    arm();
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const reader = r.body.getReader(), parts = [];
+    for (let c; !(c = await reader.read()).done; arm()) { parts.push(c.value); got += c.value.length; }
+    return JSON.parse(await new Blob(parts).text());
+  } finally {
+    clearTimeout(timer);
+    clearInterval(trickle);
+  }
+}
+
 async function refresh() {
   const last = S.history[S.history.length - 1];
+  let fresh = false;
   try {
-    const r = await fetch(`/api/state?since=${last ? last[0] : 0}`, { cache: 'no-store' });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const d = await r.json();
+    const d = await request(`/api/state?since=${last ? last[0] : 0}`, { cache: 'no-store' });
     S.offset = d.server_time - Date.now() / 1000;
     if (d.boot !== S.boot) {  // server restarted: its history starts over
       S.boot = d.boot; S.history = []; S.version = -1; S.bellSeq = null;
@@ -164,14 +240,23 @@ async function refresh() {
     if (d.version !== S.version) {
       S.version = d.version;
       S.pollPending = false;
-      render();
-      checkBell(d);
+      fresh = true;
     }
   } catch {
     S.serverOk = false;
   }
+  // outside the try: a bug in rendering must not pass for a lost connection
+  if (fresh) {
+    try {
+      checkBell(S.data);
+      render();
+    } catch (e) {
+      console.error('keymeter: could not render the update', e);
+    }
+  }
   renderBanner();
   renderLive();
+  renderTitle();
 }
 
 async function loop() {
@@ -180,11 +265,11 @@ async function loop() {
 }
 
 async function pollNow() {
+  if ($('poll-now').getAttribute('aria-disabled') === 'true') return;
   S.pollPending = true;
   renderLive();
   try {
-    const r = await fetch('/api/poll', { method: 'POST' });
-    if (!(await r.json()).queued) S.pollPending = false;
+    if (!(await request('/api/poll', { method: 'POST' })).queued) S.pollPending = false;
   } catch {
     S.pollPending = false;
   }
@@ -195,7 +280,8 @@ async function pollNow() {
 
 function checkBell(d) {
   if (S.bellSeq != null && d.bell_seq > S.bellSeq && S.alerts) {
-    const ev = d.events[d.events.length - 1];
+    // info events (a reset, a new model) can land after the one that rang the bell
+    const ev = d.events.findLast(e => e.level !== 'info') ?? d.events[d.events.length - 1];
     if (ev) {
       beep(ev.level);
       try {
@@ -230,8 +316,7 @@ async function toggleAlerts() {
     beep('good');  // inside the click, so the browser lets audio start
     if ('Notification' in window && Notification.permission === 'default') await Notification.requestPermission();
   }
-  renderAlertsBtn();
-  fadeIn($('alerts-btn').firstChild);
+  crossfade(renderAlertsBtn);
 }
 
 function renderAlertsBtn() {
@@ -252,19 +337,13 @@ function renderAlertsBtn() {
 
 // ---------------------------------------------------------------- theme
 
-function applyTheme(animate = false) {
+function applyTheme() {
   const root = document.documentElement;
-  if (animate && !reduceMotion.matches) {  // crossfade the colours (see .theming in styles.css)
-    root.classList.add('theming');
-    clearTimeout(S.themeTimer);
-    S.themeTimer = setTimeout(() => root.classList.remove('theming'), 400);
-  }
   if (S.theme === 'auto') delete root.dataset.theme; else root.dataset.theme = S.theme;
   const btn = $('theme-btn'), label = `Theme: ${S.theme}. Click to change`;
   btn.replaceChildren(icon({ auto: 'monitor', light: 'sun', dark: 'moon' }[S.theme]));
   btn.setAttribute('aria-label', label);
   btn.title = label;
-  if (animate) fadeIn(btn.firstChild);
 }
 
 // ---------------------------------------------------------------- render: frame
@@ -289,7 +368,6 @@ function render() {
   }
   renderEvents(d.events);
   renderFoot(d);
-  renderTitle(s);
 }
 
 function renderHeader(s) {
@@ -302,9 +380,7 @@ function renderHeader(s) {
     h('span', { text: `key ${s.key}${ki.alias ? ` (${ki.alias})` : ''}` }),
   );
   const [tone, ic] = statusInfo(s.status);
-  const pill = h('span', { class: `pill st-${tone}` }, icon(ic, s.status === 'STARTING' ? 'spin' : ''), s.status);
-  $('status-slot').replaceChildren(pill);
-  if (s.status !== S.status) { S.status = s.status; fadeIn(pill); }
+  $('status-slot').replaceChildren(h('span', { class: `pill st-${tone}` }, icon(ic, s.status === 'STARTING' ? 'spin' : ''), s.status));
 }
 
 function renderBanner() {
@@ -348,13 +424,17 @@ function renderLive() {
   }
   $('live').dataset.state = state;
   $('live-text').textContent = text;
-  $('poll-now').disabled = S.serverOk !== true || !d || d.poller.polling || S.pollPending;
+  // aria-disabled, not disabled: a disabled button drops keyboard focus to the page
+  $('poll-now').setAttribute('aria-disabled', String(S.serverOk !== true || !d || d.poller.polling || S.pollPending));
 }
 
-function renderTitle(s) {
-  const pct = s.key_info?.used_pct;
-  document.title = `${s.status === 'OK' && pct != null ? `${Math.round(pct)}% · ` : ''}${s.status} · keymeter`;
-  let tone = statusInfo(s.status)[0];
+// Tab title and favicon: % used and status, or "Offline" while the keymeter server is unreachable.
+function renderTitle() {
+  const s = S.data?.summary, off = S.serverOk === false;
+  if (!s && !off) return;
+  const pct = off ? null : s.key_info?.used_pct;
+  document.title = off ? 'Offline · keymeter' : `${s.status === 'OK' && pct != null ? `${Math.round(pct)}% · ` : ''}${s.status} · keymeter`;
+  let tone = off ? 'critical' : statusInfo(s.status)[0];
   if (tone === 'good' && level(pct) !== 'ok') tone = level(pct) === 'crit' ? 'critical' : 'warning';
   const color = FAVICON_COLOR[tone], frac = pct == null ? 1 : Math.min(Math.max(pct, 0), 100) / 100;
   const key = `${color}${frac.toFixed(2)}`;
@@ -385,18 +465,13 @@ function renderEvents(events) {
     list.replaceChildren(h('li', { class: 'table-empty', text: 'No events yet' }));
     return;
   }
-  const fresh = [];
   list.replaceChildren(...events.slice().reverse().map(ev => {
     const [tone, ic] = EVENT_STYLE[ev.level] || EVENT_STYLE.info;
-    const li = h('li', {},
+    return h('li', {},
       h('span', { class: 'ev-time', text: fmtTime(ev.ts, true) }),
       h('span', { class: `ev-icon st-${tone}` }, icon(ic)),
       h('span', { class: 'ev-text', text: ev.text }));
-    if (ev.ts > S.lastEventTs) fresh.push(li);
-    return li;
   }));
-  S.lastEventTs = Math.max(S.lastEventTs, ...events.map(ev => ev.ts));
-  fresh.forEach(li => fadeIn(li, 400));
 }
 
 function renderFoot(d) {
@@ -407,18 +482,14 @@ function renderFoot(d) {
 
 // ---------------------------------------------------------------- render: KPI tiles
 
+// No meter when the gateway gives a budget but no % used (a negative budget, a model limit without spend).
 function meter(pct, label, small) {
+  if (pct == null) return null;
   const c = S.data.config;
   const el = h('div', {
-    class: `meter lv-${level(pct)}${small ? ' sm' : ''}`, role: 'meter', 'aria-label': label,
-    'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': pct.toFixed(1), 'aria-valuetext': `${pct.toFixed(1)}% used`,
-  });
-  // the tile is rebuilt every poll, so start the fill where it was and let its CSS transition move it
-  const w = Math.min(Math.max(pct, 0), 100), was = S.meters.get(label) ?? 0;
-  const fillEl = h('div', { class: 'meter-fill', style: { width: `${was}%` } });
-  el.append(fillEl);
-  S.meters.set(label, w);
-  if (was !== w) requestAnimationFrame(() => { void fillEl.offsetWidth; fillEl.style.width = `${w}%`; });
+    class: `meter lv-${level(pct)}${small ? ' sm' : ''}`, role: 'meter', 'aria-label': label, 'aria-valuemin': 0, 'aria-valuemax': 100,
+    'aria-valuenow': Math.min(Math.max(pct, 0), 100).toFixed(1), 'aria-valuetext': `${pct.toFixed(1)}% used`,
+  }, slide(h('div', { class: 'meter-fill' }), `meter:${label}`, pct));
   if (!small) {
     for (const t of [c.warn, c.crit]) el.append(h('span', { class: 'meter-tick', style: { left: `${t * 100}%` }, title: `alert at ${Math.round(t * 100)}%` }));
   }
@@ -435,14 +506,16 @@ function budgetTile(v) {
   const label = text => h('div', { class: 'tile-label', text });
   const tile = h('section', { class: 'card tile tile-hero' });
   if (v.max_budget == null) {
-    return add(tile, [label('Key spend'), h('div', { class: 'tile-value', text: usd(v.spend) }),
+    return add(tile, [label('Key spend'), h('div', { class: 'tile-value' }, counter('spend', v.spend, usd)),
       h('p', { class: 'tile-sub', text: 'No budget cap on this key' })]);
   }
+  const neg = v.max_budget < 0;  // no remaining or % used, and nothing can be spent
   return add(tile, [
-    h('div', { class: 'tile-top' }, label('Key budget left'), levelTag(v.used_pct)),
-    h('div', { class: 'tile-value', text: usd(v.remaining) }),
+    h('div', { class: 'tile-top' }, label('Key budget left'), levelTag(neg ? 100 : v.used_pct)),
+    h('div', { class: 'tile-value' }, counter('left', neg ? 0 : v.remaining, usd)),
     meter(v.used_pct, 'Key budget used'),
-    h('p', { class: 'tile-sub' }, h('strong', { text: `${v.used_pct.toFixed(1)}%` }), ` used · ${usd(v.spend)} of ${usd(v.max_budget)}`),
+    v.used_pct == null ? h('p', { class: 'tile-sub', text: `${usd(v.spend)} spent · the budget is below zero (${usd(v.max_budget)})` })
+      : h('p', { class: 'tile-sub' }, h('strong', { text: `${v.used_pct.toFixed(1)}%` }), ` used · ${usd(v.spend)} of ${usd(v.max_budget)}`),
     v.reset_in_s != null && h('p', { class: 'tile-sub' }, 'Resets in ', tick(v.reset_in_s), v.budget_duration ? ` (every ${v.budget_duration})` : ''),
     v.soft_budget ? h('p', { class: 'tile-sub', text: `Soft limit ${usd(v.soft_budget)}` }) : null,
   ]);
@@ -453,9 +526,13 @@ function burnTile(v) {
   return h('section', { class: 'card tile' },
     h('div', { class: 'tile-label', text: 'Burn rate' }),
     r == null ? h('div', { class: 'tile-value small dim', text: 'measuring…' })
-      : h('div', { class: 'tile-value' }, usd(r), h('span', { class: 'unit', text: '/h' })),
+      : h('div', { class: 'tile-value' }, counter('burn', r, usd), h('span', { class: 'unit', text: '/h' })),
     h('p', { class: 'tile-sub', text: `Over the last ${fmtMin(S.data.config.window)}` }));
 }
+
+// A budget with nothing left, whatever the burn rate (monitor sets runs_out_in_s to 0 then). A negative budget
+// has no remaining or % used, but the gateway counts any spend as over it.
+const usedUp = v => v.max_budget != null && (v.max_budget < 0 || v.runs_out_in_s === 0 || (v.remaining != null && v.remaining <= 0));
 
 // When the key budget runs out at the current burn rate.
 function runoutTile(v) {
@@ -463,16 +540,16 @@ function runoutTile(v) {
   const value = (cls, ...kids) => h('div', { class: `tile-value ${cls}` }, ...kids);
   const sub = (...kids) => h('p', { class: 'tile-sub' }, ...kids);
   if (v.max_budget == null) return add(tile, [value('small dim', 'no cap'), sub('This key has no budget cap')]);
+  if (usedUp(v)) return add(tile, [value('t-crit', icon('octagon-x'), 'used up'), sub('No budget left until it resets')]);
   if (v.burn_per_hour == null) return add(tile, [value('small dim', 'measuring…'), sub('Needs two polls to measure the burn rate')]);
   if (v.runs_out_in_s == null) return add(tile, [value('small t-good', 'not at this rate'), sub(`No spend in the last ${fmtMin(S.data.config.window)}`)]);
   const eta = v.runs_out_in_s;
-  if (!eta) return add(tile, [value('t-crit', icon('octagon-x'), 'used up'), sub('No budget left until it resets')]);
-  if (v.reset_in_s != null && eta > v.reset_in_s) {
-    return add(tile, [value('t-good', tick(eta)), sub('But the budget resets first, in ', tick(v.reset_in_s))]);
+  if (v.reset_in_s > 0 && eta > v.reset_in_s) {  // an overdue reset (reset_in_s <= 0) may still come too late
+    return add(tile, [value('t-good', counter('runout', eta, fmtDur, 'down')), sub('But the budget resets first, in ', tick(v.reset_in_s))]);
   }
   const crit = eta < 3600;
   return add(tile, [
-    value(crit ? 't-crit' : 't-warn', icon(crit ? 'octagon-x' : 'triangle-alert'), tick(eta)),
+    value(crit ? 't-crit' : 't-warn', icon(crit ? 'octagon-x' : 'triangle-alert'), counter('runout', eta, fmtDur, 'down')),
     sub(`Around ${fmtClock(S.data.summary_time + eta)}, before the budget resets`),
   ]);
 }
@@ -498,11 +575,11 @@ function kvTable(rows) {
 
 function runoutCell(v) {
   if (v.max_budget == null) return dim('no cap');
+  if (usedUp(v)) return withIcon('t-crit', 'octagon-x', 'used up');
   if (v.burn_per_hour == null) return dim('measuring…');
   if (v.runs_out_in_s == null) return h('span', { class: 't-good', text: 'not at this rate' });
   const eta = v.runs_out_in_s;
-  if (!eta) return withIcon('t-crit', 'octagon-x', 'used up');
-  if (v.reset_in_s != null && eta > v.reset_in_s) return h('span', { class: 't-good' }, tick(eta), ' (after reset)');
+  if (v.reset_in_s > 0 && eta > v.reset_in_s) return h('span', { class: 't-good' }, tick(eta), ' (after reset)');
   const crit = eta < 3600;
   return withIcon(crit ? 't-crit' : 't-warn', crit ? 'octagon-x' : 'triangle-alert', tick(eta), ` · ${fmtClock(S.data.summary_time + eta)}`);
 }
@@ -562,11 +639,11 @@ function renderModels(s) {
     usd(r.spend),
     r.session_spend == null ? dim('—') : r.session_spend ? `+${usd(r.session_spend)}` : dim(`+${usd(0)}`),
     r.share_pct == null ? dim('—') : h('span', { class: 'share' },
-      h('span', { class: 'share-track', 'aria-hidden': 'true' }, h('span', { class: 'share-fill', style: { width: `${r.share_pct}%` } })),
+      h('span', { class: 'share-track', 'aria-hidden': 'true' }, slide(h('span', { class: 'share-fill' }), `share:${r.model}`, r.share_pct)),
       `${Math.round(r.share_pct)}%`),
     ...(withLimits ? [r.limit ? h('span', { class: 'budget-cell' },
       meter(r.used_pct, `${r.model} budget used`, true),
-      h('span', { text: `${usd(r.period_spend)} / ${usd(r.limit)}` }),
+      h('span', { text: r.period_spend == null ? `limit ${usd(r.limit)}` : `${usd(r.period_spend)} / ${usd(r.limit)}` }),
       (r.period || level(r.used_pct) !== 'ok') && h('span', { class: 'dim' }, r.period ? `per ${r.period} ` : '', levelTag(r.used_pct)))
       : dim('—')] : []),
   ])));
@@ -601,6 +678,10 @@ function timeTicks(x0, x1, max) {
   return { ticks, step };
 }
 
+// Spend a poll added: the change since the poll before or, when spend went down (the budget period
+// reset), the new value itself.
+const added = (prev, v) => (v < prev ? v : v - prev);
+
 function nearest(pts, t) {
   let lo = 0, hi = pts.length - 1;
   while (hi - lo > 1) {
@@ -610,14 +691,17 @@ function nearest(pts, t) {
   return Math.abs(pts[lo][0] - t) <= Math.abs(pts[hi][0] - t) ? lo : hi;
 }
 
-function plotFrame(W, H, yt) {
+// Gridlines and $ labels for ticks `yt`, on a y scale from lo to hi (mid-glide these are between the old
+// and the new scale, and ticks outside the plot are left out).
+function plotFrame(W, H, yt, lo = yt.lo, hi = yt.hi) {
   const labels = yt.ticks.map(v => fmtTick(v, yt.step));
   const m = { t: 10, r: 12, b: 28, l: Math.round(Math.max(...labels.map(l => l.length)) * 6.4 + 14) };
   const pw = W - m.l - m.r, ph = H - m.t - m.b;
-  const Y = v => m.t + (1 - (v - yt.lo) / (yt.hi - yt.lo)) * ph;
+  const Y = v => m.t + (1 - (v - lo) / (hi - lo)) * ph;
   const svg = sv('svg', { viewBox: `0 0 ${W} ${H}`, width: W, height: H, tabindex: 0 });
   yt.ticks.forEach((v, i) => {
     const y = Math.round(Y(v)) + 0.5;
+    if (y < m.t - 1 || y > m.t + ph + 1) return;
     svg.append(
       sv('line', { class: i ? 'grid-line' : 'axis-line', x1: m.l, x2: W - m.r, y1: y, y2: y }),
       sv('text', { class: 'tick', x: m.l - 8, y, dy: '0.32em', 'text-anchor': 'end' }, labels[i]));
@@ -640,11 +724,19 @@ function placeTip(tip, x, W, top) {
 }
 
 // Hover and keyboard layer shared by both charts. The hovered spot is remembered as a time (c.hoverT)
-// so it survives the redraw every poll triggers; keyboard focus survives it too.
+// so it survives the redraw every poll (and every glide frame) triggers; keyboard focus survives it too,
+// without bringing back a tooltip the pointer or Escape dismissed.
 function interact(c, svg, n, { idxAt, tAt, paint, unpaint, keepT, hadFocus }) {
   let cur = -1;
   const show = i => { cur = i; c.hoverT = tAt(i); paint(i); };
   const hide = () => { cur = -1; c.hoverT = null; unpaint(); };
+  c.unhover = hide;  // for chartCard's pointerleave, which outlives the hit areas a glide rebuilds every frame
+  const keep = keepT == null ? -1 : idxAt(keepT);
+  if (hadFocus) svg.focus({ preventScroll: true });  // before the focus listener, which would paint the newest point
+  if (keep >= 0) {
+    show(keep);
+    c.body.querySelector('.tip').getAnimations().forEach(a => a.finish());  // on screen already: no fade-in on a redraw
+  }
   svg.addEventListener('focus', () => show(cur >= 0 ? cur : n - 1));
   svg.addEventListener('blur', hide);
   svg.addEventListener('keydown', e => {
@@ -653,41 +745,70 @@ function interact(c, svg, n, { idxAt, tAt, paint, unpaint, keepT, hadFocus }) {
     if (next != null) { show(Math.min(Math.max(next, 0), n - 1)); e.preventDefault(); }
     if (e.key === 'Escape') hide();
   });
-  const keep = keepT == null ? -1 : idxAt(keepT);
-  if (hadFocus) {
-    cur = keep >= 0 ? keep : n - 1;
-    svg.focus({ preventScroll: true });
-  } else if (keep >= 0) {
-    show(keep);
-  }
   return { show, hide };
 }
 
-// Cumulative spend: line with a crosshair tooltip that snaps to the nearest poll.
-function drawLine(c, pts, opts) {
-  const body = c.body, keepT = c.hoverT, hadFocus = body.contains(document.activeElement);
-  body.replaceChildren();
-  if (pts.length < 2 || pts[pts.length - 1][0] <= pts[0][0]) {
-    body.append(h('div', { class: 'chart-empty', text: 'Waiting for a second poll…' }));
+// Charts glide: when a poll adds data, a chart moves from the shape on screen to the new one over
+// MOVE_MS (the line grows to the new point, the axes and bars slide) instead of jumping. A shape holds
+// what changes between polls: the scales, the newest point and, for bars, every interval's value.
+function glide(c, to, mix, paint) {
+  const from = c.shapeNow;
+  if (!from || from.range !== to.range || from.width !== to.width || !(to.t > from.t)) {
+    still(c);
+    c.shapeNow = to;
+    paint(to);
     return;
   }
-  const W = Math.max(body.clientWidth, 260), H = 230;
+  tween(c, p => { c.shapeNow = p >= 1 ? to : mix(from, to, p); paint(c.shapeNow); });
+}
+
+// Stop a glide and forget the shape, when the chart gives way to a table or a message.
+function still(c) {
+  cancelAnimationFrame(c.raf);
+  c.shapeNow = null;
+}
+
+// What a chart with under two polls in range says. Polls may all fall before the range (--interval longer than it).
+const emptyChart = () => h('div', { class: 'chart-empty',
+  text: S.history.length > 1 ? 'Only one poll in this range; pick a longer range' : 'Waiting for a second poll…' });
+
+// Cumulative spend: line with a crosshair tooltip that snaps to the nearest poll.
+function drawLine(c, pts, opts) {
+  if (pts.length < 2 || pts[pts.length - 1][0] <= pts[0][0]) {
+    still(c);
+    c.body.replaceChildren(emptyChart());
+    return;
+  }
   let lo = Infinity, hi = -Infinity;
   for (const p of pts) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); }
-  const { svg, m, pw, ph, Y } = plotFrame(W, H, niceTicks(lo, hi, 4));
-  const x0 = pts[0][0], x1 = pts[pts.length - 1][0];
+  const yt = niceTicks(lo, hi, 4), end = pts[pts.length - 1];
+  const to = { range: S.range, x0: pts[0][0], x1: end[0], lo: yt.lo, hi: yt.hi, t: end[0], v: end[1] };
+  const mix = (a, b, p) => ({ ...b, x0: lerp(a.x0, b.x0, p), x1: lerp(a.x1, b.x1, p), lo: lerp(a.lo, b.lo, p),
+    hi: lerp(a.hi, b.hi, p), t: lerp(a.t, b.t, p), v: lerp(a.v, b.v, p) });
+  glide(c, to, mix, s => paintLine(c, pts, opts, yt, s));
+}
+
+function paintLine(c, pts, opts, yt, s) {
+  const body = c.body, keepT = c.hoverT, hadFocus = body.contains(document.activeElement);
+  body.replaceChildren();
+  const W = Math.max(body.clientWidth, 260), H = 230;
+  const { svg, m, pw, ph, Y } = plotFrame(W, H, yt, s.lo, s.hi);
+  const { x0, x1 } = s;
   const X = t => m.l + (t - x0) / (x1 - x0) * pw;
+  const first = pts[0], last = pts[pts.length - 1];
   svg.setAttribute('role', 'img');
-  svg.setAttribute('aria-label', `${opts.label}: ${usd(pts[0][1])} to ${usd(pts[pts.length - 1][1])} over ${fmtDur(x1 - x0)}. Use arrow keys to step through polls.`);
+  svg.setAttribute('aria-label', `${opts.label}: ${usd(first[1])} to ${usd(last[1])} over ${fmtDur(last[0] - first[0])}. Use arrow keys to step through polls.`);
   xAxis(svg, m, H, x0, x1, X, pw);
-  svg.append(sv('path', { class: 'series-line', d: pts.map((p, i) => `${i ? 'L' : 'M'}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join('') }));
-  const end = pts[pts.length - 1];
-  svg.append(sv('circle', { class: 'series-dot', cx: X(end[0]), cy: Y(end[1]), r: 4 }));
+  // mid-glide the line ends at the moving tip (s.t, s.v); polls past it are not drawn yet
+  const shown = decimate(pts.filter(p => p[0] < s.t), X);
+  shown.push([s.t, s.v]);
+  svg.append(sv('path', { class: 'series-line', d: shown.map((p, i) => `${i ? 'L' : 'M'}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join('') }));
+  svg.append(sv('circle', { class: 'series-dot', cx: X(s.t), cy: Y(s.v), r: 4 }));
   const cross = sv('line', { class: 'cross', y1: m.t, y2: m.t + ph, visibility: 'hidden' });
   const hot = sv('circle', { class: 'series-dot', r: 5, visibility: 'hidden' });
   const hit = sv('rect', { class: 'hit', x: m.l - 10, y: 0, width: pw + 20, height: m.t + ph });
   svg.append(cross, hot, hit);
-  const tip = h('div', { class: 'tip', hidden: true });
+  const tip = h('div', { class: 'tip', hidden: true, 'aria-live': 'polite' });
   body.append(svg, tip);
 
   const ui = interact(c, svg, pts.length, {
@@ -698,12 +819,11 @@ function drawLine(c, pts, opts) {
       const p = pts[i], x = X(p[0]);
       for (const [k, v] of [['x1', x], ['x2', x], ['visibility', 'visible']]) cross.setAttribute(k, v);
       for (const [k, v] of [['cx', x], ['cy', Y(p[1])], ['visibility', 'visible']]) hot.setAttribute(k, v);
-      const delta = i ? p[1] - pts[i - 1][1] : null;
       fill(tip,
         h('strong', { text: usd(p[1]) }),
         h('span', { class: 'tip-row' }, h('span', { class: 'tip-key' }), opts.series),
         h('span', { class: 'tip-row', text: fmtTime(p[0], true) }),
-        delta != null && h('span', { class: 'tip-row', text: `${delta >= 0 ? '+' : ''}${usd(delta)} since the poll before` }));
+        i > 0 && h('span', { class: 'tip-row', text: `+${usd(added(pts[i - 1][1], p[1]))} since the poll before` }));
       placeTip(tip, x, W, m.t);
     },
     unpaint: () => {
@@ -719,33 +839,66 @@ function drawLine(c, pts, opts) {
   hit.addEventListener('pointerleave', ui.hide);
 }
 
+// The polls the line is drawn through: in each pixel column only the first, lowest, highest and last,
+// which draw the same shape, so a day of 1s polls costs what the chart's width does. Tooltips use all polls.
+function decimate(pts, X) {
+  const out = [];
+  for (let i = 0, j; i < pts.length; i = j) {
+    const col = Math.floor(X(pts[i][0]));
+    let lo = i, hi = i;
+    for (j = i + 1; j < pts.length && Math.floor(X(pts[j][0])) === col; j++) {
+      if (pts[j][1] < pts[lo][1]) lo = j;
+      if (pts[j][1] > pts[hi][1]) hi = j;
+    }
+    for (const k of new Set([i, Math.min(lo, hi), Math.max(lo, hi), j - 1])) out.push(pts[k]);
+  }
+  return out;
+}
+
 // Spend per time bucket (positive deltas between polls), one column per bucket.
 function drawBars(c, b) {
+  const max = Math.max(...b.sums), yt = niceTicks(0, max > 0 ? max : 0.001, 3);
+  const to = { range: S.range, width: b.width, start: b.start, end: b.start + b.sums.length * b.width, hi: yt.hi,
+    t: S.history.length ? S.history[S.history.length - 1][0] : 0, sums: new Map(b.sums.map((v, i) => [b.start + i * b.width, v])) };
+  const mix = (a, z, p) => ({ ...z, start: lerp(a.start, z.start, p), end: lerp(a.end, z.end, p), hi: lerp(a.hi, z.hi, p),
+    t: lerp(a.t, z.t, p), sums: new Map([...z.sums].map(([k, v]) => [k, lerp(a.sums.get(k) ?? 0, v, p)])) });
+  glide(c, to, mix, s => paintBars(c, b, yt, max, s));
+}
+
+function paintBars(c, b, yt, max, s) {
   const body = c.body, keepT = c.hoverT, hadFocus = body.contains(document.activeElement);
   body.replaceChildren();
   const n = b.sums.length, W = Math.max(body.clientWidth, 260), H = 200;
-  const max = Math.max(...b.sums);
-  const { svg, m, pw, ph, Y } = plotFrame(W, H, niceTicks(0, max > 0 ? max : 0.001, 3));
-  const span = n * b.width, band = pw / n, bw = Math.max(Math.min(24, band - 2), 1);
-  const X = t => m.l + (t - b.start) / span * pw;
+  const { svg, m, pw, ph, Y } = plotFrame(W, H, yt, 0, s.hi);
+  const X = t => m.l + (t - s.start) / (s.end - s.start) * pw;
+  const band = b.width / (s.end - s.start) * pw, bw = Math.max(Math.min(24, band - 2), 1);
   svg.setAttribute('role', 'img');
   svg.setAttribute('aria-label', `Key spend per ${fmtDur(b.width)}: ${usd(b.sums.reduce((a, v) => a + v, 0))} in total, at most ${usd(max)} in one interval. Use arrow keys to step through intervals.`);
-  xAxis(svg, m, H, b.start, b.start + span, X, pw);
-  const g = sv('g', { class: 'bars' }), bars = [];
-  b.sums.forEach((v, i) => {
-    const x = m.l + i * band + (band - bw) / 2, base = Y(0), top = Math.min(Y(v), base - 1), r = Math.min(4, bw / 2, base - top);
-    bars.push(v > 0 ? g.appendChild(sv('path', {
-      class: 'bar',
+  xAxis(svg, m, H, s.start, s.end, X, pw);
+  // A held selection is drawn hovered from the start: classes added once the bars have a style would fade the
+  // other bars down from full opacity on every redraw (.bar has an opacity transition).
+  const idxAt = t => { const i = Math.floor((t - b.start) / b.width); return i >= 0 && i < n ? i : -1; };
+  const keep = keepT == null ? -1 : idxAt(keepT);
+  const g = sv('g', { class: keep >= 0 ? 'bars has-hot' : 'bars' }), bars = [];
+  b.sums.forEach((_, i) => {
+    const key = b.start + i * b.width, v = s.sums.get(key) ?? 0;
+    if (!(v > 0) || key >= s.end) {  // nothing spent, or mid-glide and not on the chart yet
+      bars.push(null);
+      return;
+    }
+    const x = X(key) + (band - bw) / 2, base = Y(0), top = Math.min(Y(v), base - 1), r = Math.min(4, bw / 2, base - top);
+    bars.push(g.appendChild(sv('path', {
+      class: i === keep ? 'bar hot' : 'bar',
       d: `M${x},${base}V${top + r}A${r},${r} 0 0 1 ${x + r},${top}H${x + bw - r}A${r},${r} 0 0 1 ${x + bw},${top + r}V${base}Z`,
-    })) : null);
+    })));
   });
   svg.append(g);
-  const tip = h('div', { class: 'tip', hidden: true });
+  const tip = h('div', { class: 'tip', hidden: true, 'aria-live': 'polite' });
   body.append(svg, tip);
   if (max <= 0) body.append(h('div', { class: 'chart-note', text: 'No key spend in this range' }));
 
   const ui = interact(c, svg, n, {
-    idxAt: t => { const i = Math.floor((t - b.start) / b.width); return i >= 0 && i < n ? i : -1; },
+    idxAt,
     tAt: i => b.start + (i + 0.5) * b.width,
     keepT, hadFocus,
     paint: i => {
@@ -756,7 +909,7 @@ function drawBars(c, b) {
         h('strong', { text: usd(b.sums[i]) }),
         h('span', { class: 'tip-row' }, h('span', { class: 'tip-key' }), 'key spend'),
         h('span', { class: 'tip-row', text: `${fmtTime(t0, secs)} – ${fmtTime(t0 + b.width, secs)}` }));
-      placeTip(tip, m.l + (i + 0.5) * band, W, m.t);
+      placeTip(tip, X(b.start + (i + 0.5) * b.width), W, m.t);
     },
     unpaint: () => {
       g.classList.remove('has-hot');
@@ -764,7 +917,7 @@ function drawBars(c, b) {
     },
   });
   b.sums.forEach((_, i) => {
-    const hit = sv('rect', { class: 'hit', x: m.l + i * band, y: 0, width: band, height: m.t + ph });
+    const hit = sv('rect', { class: 'hit', x: X(b.start + i * b.width), y: 0, width: band, height: m.t + ph });
     hit.addEventListener('pointerenter', () => ui.show(i));
     hit.addEventListener('pointerleave', ui.hide);
     svg.append(hit);
@@ -779,7 +932,7 @@ function bucketize(hist, x0, x1) {
   for (let i = 1; i < hist.length; i++) {
     const [t, v] = hist[i];
     if (t < x0 || t > x1) continue;
-    const dv = v - hist[i - 1][1];
+    const dv = added(hist[i - 1][1], v);
     if (dv > 0) sums[Math.floor((t - start) / width)] += dv;
   }
   return { start, width, sums };
@@ -787,7 +940,7 @@ function bucketize(hist, x0, x1) {
 
 function chartCard(title) {
   const c = {
-    title, table: false, draw: null, hoverT: null, lastW: 0,
+    title, table: false, draw: null, hoverT: null, unhover: null, lastW: 0, raf: 0, shapeNow: null,
     body: h('div', { class: 'chart' }),
     sub: h('p', { class: 'card-sub' }),
     stat: h('div', { class: 'head-stat' }),
@@ -796,14 +949,15 @@ function chartCard(title) {
   c.card = h('section', { class: 'card' },
     h('div', { class: 'card-head' }, h('div', {}, h('h2', { class: 'card-title', text: title }), c.sub), h('div', { class: 'card-tools' }, c.stat, c.btn)),
     c.body);
-  c.btn.addEventListener('click', () => {
+  c.btn.addEventListener('click', () => crossfade(() => {
     c.table = !c.table;
     c.btn.setAttribute('aria-pressed', String(c.table));
     c.btn.setAttribute('aria-label', c.table ? `Show ${title.toLowerCase()} as a chart` : `Show ${title.toLowerCase()} as a table`);
     c.btn.replaceChildren(icon(c.table ? 'chart-line' : 'table'));
     c.draw?.();
-    fadeIn(c.body);
-  });
+  }));
+  // a pointer that leaves while a glide replaces the hit areas never reaches their pointerleave
+  c.body.addEventListener('pointerleave', () => c.unhover?.());
   new ResizeObserver(() => {
     if (c.body.clientWidth !== c.lastW) { c.lastW = c.body.clientWidth; if (!c.table) c.draw?.(); }
   }).observe(c.body);
@@ -811,23 +965,24 @@ function chartCard(title) {
 }
 
 function showTable(c, head, rows, note) {
+  still(c);
+  const top = c.body.querySelector('.table-wrap')?.scrollTop ?? 0;  // the rebuild every poll keeps the scroll
   fill(c.body, h('div', { class: 'table-wrap' }, table(head, rows)), note && h('p', { class: 'card-sub', text: note }));
+  c.body.querySelector('.table-wrap').scrollTop = top;
 }
 
 function lineTable(c, pts) {
   const rows = [];
   for (let i = pts.length - 1; i >= Math.max(pts.length - 200, 0); i--) {
-    const d = i ? pts[i][1] - pts[i - 1][1] : null;
-    rows.push([fmtTime(pts[i][0], true), usd(pts[i][1]), d == null ? dim('—') : `${d >= 0 ? '+' : ''}${usd(d)}`]);
+    rows.push([fmtTime(pts[i][0], true), usd(pts[i][1]), i ? `+${usd(added(pts[i - 1][1], pts[i][1]))}` : dim('—')]);
   }
   showTable(c, [['Time', ''], ['Spend', 'num'], ['Change', 'num']], rows, pts.length > 200 ? `Latest 200 of ${pts.length} polls` : null);
 }
 
 function renderSpendChart(c, pts, label) {
-  const first = pts[0], last = pts[pts.length - 1];
+  const last = pts[pts.length - 1], sum = pts.reduce((a, p, i) => a + (i ? added(pts[i - 1][1], p[1]) : 0), 0);
   c.sub.textContent = 'Cumulative spend, one point per poll';
-  c.stat.replaceChildren(...(last ? [h('strong', { text: usd(last[1]) }),
-    pts.length > 1 ? `+${usd(Math.max(last[1] - first[1], 0))} in range` : 'latest'] : []));
+  c.stat.replaceChildren(...(last ? [h('strong', { text: usd(last[1]) }), pts.length > 1 ? `+${usd(sum)} in range` : 'latest'] : []));
   c.draw = () => (c.table ? lineTable(c, pts) : drawLine(c, pts, { label, series: label.toLowerCase() }));
   c.draw();
 }
@@ -845,7 +1000,7 @@ function renderCharts() {
   if (inRange.length < 2) {
     bars.sub.textContent = 'Spend added between polls';
     bars.stat.replaceChildren();
-    bars.draw = () => bars.body.replaceChildren(h('div', { class: 'chart-empty', text: 'Waiting for a second poll…' }));
+    bars.draw = () => { still(bars); bars.body.replaceChildren(emptyChart()); };
   } else {
     const b = bucketize(hist, inRange[0][0], x1);
     const total = b.sums.reduce((a, v) => a + v, 0);
@@ -860,20 +1015,22 @@ function renderCharts() {
   bars.draw();
 }
 
+// The buttons are made once and a click only moves aria-pressed, so the clicked button keeps keyboard focus.
 function renderRange() {
-  $('range').replaceChildren(...RANGES.map(([k]) => {
-    const btn = h('button', { type: 'button', 'aria-pressed': String(k === S.range), text: k });
-    btn.addEventListener('click', () => {
-      S.range = k;
-      save('keymeter-range', k);
-      renderRange();
-      if (S.data?.summary.key_info) {
-        renderCharts();
-        for (const c of Object.values(charts)) fadeIn(c.body);
-      }
-    });
-    return btn;
-  }));
+  const seg = $('range');
+  if (!seg.children.length) {
+    seg.append(...RANGES.map(([k]) => {
+      const btn = h('button', { type: 'button', text: k });
+      btn.addEventListener('click', () => crossfade(() => {
+        S.range = k;
+        save('keymeter-range', k);
+        renderRange();
+        if (S.data?.summary.key_info) renderCharts();
+      }));
+      return btn;
+    }));
+  }
+  RANGES.forEach(([k], i) => seg.children[i].setAttribute('aria-pressed', String(k === S.range)));
 }
 
 // ---------------------------------------------------------------- init
@@ -890,7 +1047,7 @@ function init() {
   $('theme-btn').addEventListener('click', () => {
     S.theme = THEMES[(THEMES.indexOf(S.theme) + 1) % THEMES.length];
     save('keymeter-theme', S.theme);
-    applyTheme(true);
+    crossfade(applyTheme);
   });
   $('alerts-btn').addEventListener('click', toggleAlerts);
   $('poll-now').addEventListener('click', pollNow);
@@ -900,6 +1057,7 @@ function init() {
   setInterval(() => {
     if (!S.data) return;
     for (const el of document.querySelectorAll('.tick-val')) el.textContent = fmtDur(tickValue(el));
+    for (const c of counters.values()) if (c.dir && c.p === 1 && c.el.isConnected) c.paint(1);
     renderLive();
   }, 1000);
   loop();

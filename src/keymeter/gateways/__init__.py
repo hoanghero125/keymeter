@@ -17,11 +17,15 @@ GATEWAYS = {"litellm": LiteLLM, "openrouter": OpenRouter}
 __all__ = ["GATEWAYS", "LiteLLM", "OpenRouter", "Snapshot", "create", "detect"]
 
 
+def openrouter_host(url):
+    host = urlparse(url).hostname or ""
+    return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
+
 def detect(url, key):
     """Pick a gateway from the URL's host, or from the key's prefix when no URL is set."""
     if url:
-        host = urlparse(url).hostname or ""
-        return "openrouter" if host == "openrouter.ai" or host.endswith(".openrouter.ai") else "litellm"
+        return "openrouter" if openrouter_host(url) else "litellm"
     return "openrouter" if key.startswith("sk-or-") else "litellm"
 
 
@@ -34,4 +38,7 @@ def create(name, url, key, team=True):
     url = base_url(url or GATEWAYS[name].default_url)
     if urlparse(url).scheme not in ("http", "https") or not urlparse(url).netloc:
         raise ValueError(f"the gateway URL must start with http:// or https:// (got {url!r})")
+    if name == "openrouter" and not urlparse(url).path and openrouter_host(url):
+        # OpenRouter's API lives under /api: https://openrouter.ai -> https://openrouter.ai/api (a proxy's root may be the API root)
+        url += "/api"
     return LiteLLM(url, key, team=team) if name == "litellm" else OpenRouter(url, key)

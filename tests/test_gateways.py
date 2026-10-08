@@ -28,6 +28,20 @@ def test_create_accepts_openai_style_base_urls(url):
     assert gateways.create("openrouter", url, "sk-or-v1-abc").url == "https://openrouter.ai/api"
 
 
+@pytest.mark.parametrize("url", ["https://openrouter.ai", "https://openrouter.ai/", "https://openrouter.ai/v1"])
+def test_create_adds_api_to_a_bare_openrouter_url(url):
+    assert gateways.create("auto", url, "sk-or-v1-abc").url == "https://openrouter.ai/api"
+
+
+@pytest.mark.parametrize(("url", "expected"), [
+    ("https://eu.openrouter.ai/", "https://eu.openrouter.ai/api"),
+    ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),  # a proxy whose root is OpenRouter's API root, as in 0.1.0
+    ("https://llm.example.com/v1", "https://llm.example.com"),
+])
+def test_create_adds_api_only_on_openrouter_hosts(url, expected):
+    assert gateways.create("openrouter", url, "sk-or-v1-abc").url == expected
+
+
 def test_create_passes_team_flag_to_litellm():
     assert gateways.create("litellm", "http://gw", "sk-1234", team=False).team_allowed is False
 

@@ -5,6 +5,17 @@ import pytest
 from conftest import KEY
 
 from keymeter.cli import load_env, main
+from keymeter.gateways import LiteLLM
+
+
+def test_help_states_the_auto_rule_and_when_dotenv_is_read(monkeypatch, capsys):
+    monkeypatch.setenv("COLUMNS", "400")  # one help line per option, so argparse doesn't wrap at "sk-or-"
+    with pytest.raises(SystemExit):
+        main(["json", "-h"])
+    out = capsys.readouterr().out
+    assert ("auto: openrouter when the URL's host is openrouter.ai or a subdomain of it, or, if no URL is set, when the key "
+            "starts with sk-or-; litellm otherwise") in out
+    assert "(default: ./.env, read only when KEYMETER_KEY is not already set in the environment)" in out
 
 
 def test_load_env_parses_lines_and_keeps_real_environment(clean_env, monkeypatch):
@@ -100,3 +111,33 @@ def test_explicit_env_file_is_still_read_with_a_key_in_the_environment(clean_env
     monkeypatch.setenv("KEYMETER_KEY", KEY)
     assert main(["json", "--env", "gw.env"]) == 0
     assert gw.requests
+
+
+@pytest.mark.parametrize("blank", ["", "   ", '""'])  # `export KEYMETER_KEY=`, stray blanks, cmd's `set KEYMETER_KEY=""`
+def test_empty_key_in_the_environment_counts_as_unset(clean_env, fake_gateway, monkeypatch, capsys, blank):
+    gw = fake_gateway({"/key/info": (200, {"info": {"spend": 1.0}})})
+    (clean_env / ".env").write_text(f"KEYMETER_KEY={KEY}\nKEYMETER_URL={gw.url}\n", encoding="utf-8")
+    monkeypatch.setenv("KEYMETER_KEY", blank)
+    assert main(["json"]) == 0
+    assert gw.requests[0][2] == f"Bearer {KEY}"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", '""'])
+def test_empty_gateway_and_url_in_the_environment_count_as_unset(clean_env, fake_gateway, monkeypatch, capsys, blank):
+    gw = fake_gateway({"/key/info": (200, {"info": {"spend": 1.0}})})
+    monkeypatch.setattr(LiteLLM, "default_url", gw.url)  # so the default URL leads to the fake gateway
+    for name, value in (("KEYMETER_KEY", KEY), ("KEYMETER_GATEWAY", blank), ("KEYMETER_URL", blank)):
+        monkeypatch.setenv(name, value)
+    assert main(["json"]) == 0
+    s = json.loads(capsys.readouterr().out)
+    assert (s["gateway_type"], s["gateway"]) == ("litellm", gw.url)
+
+
+def test_team_at_its_budget_exits_0(clean_env, fake_gateway, monkeypatch, capsys):
+    # LiteLLM still serves a team at its budget (it refuses one once over it), so json must not call it a failure
+    gw = fake_gateway({"/key/info": (200, {"info": {"spend": 0.0, "max_budget": 10, "team_id": "t1"}}),
+                       "/team/info": (200, {"team_info": {"team_id": "t1", "spend": 0.0, "max_budget": 0}})})
+    monkeypatch.setenv("KEYMETER_KEY", KEY)
+    assert main(["json", "--url", gw.url]) == 0
+    s = json.loads(capsys.readouterr().out)
+    assert (s["status"], s["team_info"]["runs_out_in_s"]) == ("OK", 0)

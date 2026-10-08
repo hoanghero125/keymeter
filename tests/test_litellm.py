@@ -4,6 +4,7 @@ import threading
 import pytest
 from conftest import KEY
 
+from keymeter.gateways.base import classify
 from keymeter.gateways.litellm import LiteLLM
 
 INFO = {"key_alias": "dev", "spend": 1.5, "max_budget": 10, "team_id": None}
@@ -55,13 +56,14 @@ def test_stops_asking_for_team_after_403(fake_gateway):
     assert snap.status == "OK"
     assert snap.team_error == "HTTP 403: not allowed"
     assert snap.notices == ["this key can't read /team/info — showing key data only"]
-    adapter.fetch()
+    snap = adapter.fetch()
+    assert (snap.team_error, snap.notices) == ("HTTP 403: not allowed", [])  # still explains the missing team
     assert [p for p, _, _ in gw.requests] == ["/key/info", "/team/info", "/key/info"]
 
 
 def test_team_disabled(fake_gateway):
     gw = fake_gateway({"/key/info": (200, {"info": {**INFO, "team_id": "t1"}})})
-    LiteLLM(gw.url, KEY, team=False).fetch()
+    assert LiteLLM(gw.url, KEY, team=False).fetch().team_error == ""
     assert [p for p, _, _ in gw.requests] == ["/key/info"]
 
 
@@ -71,7 +73,21 @@ def test_error_statuses(fake_gateway):
     assert (snap.status, snap.key) == ("AUTH ERROR", {})
 
     gw.routes["/key/info"] = (400, {"error": {"message": "Budget has been exceeded! Team=t1 Current cost: 10"}})
-    assert LiteLLM(gw.url, KEY).fetch().status == "OVER BUDGET"
+    assert LiteLLM(gw.url, KEY).fetch().status == "TEAM OVER BUDGET"
+
+
+# LiteLLM checks the key's team on every route, /key/info included, so a blocked or over-budget team makes the poll
+# itself fail; the message names what was refused first
+@pytest.mark.parametrize(("status", "message", "expected"), [
+    (401, "Authentication Error, Key is blocked. Update via `/key/unblock` if you're admin.", "BLOCKED"),
+    (401, "Authentication Error, Team=t1 is blocked. Update via `/team/unblock` if you're an admin.", "TEAM BLOCKED"),
+    (400, "Budget has been exceeded! Key=dev Current cost: 10.0, Max budget: 10.0", "OVER BUDGET"),
+    (400, "Budget has been exceeded! Team=t1 Current cost: 51.0, Max budget: 50.0", "TEAM OVER BUDGET"),
+    (400, "ExceededBudget: Team=t1 over 1d budget. Spend=$5.1000, Limit=$5.00", "TEAM OVER BUDGET"),
+    (400, "Budget has been exceeded! User=u1 in Team=t1 Current cost: 5.0, Max budget: 5.0", "OVER BUDGET"),  # member budget
+])
+def test_error_status_names_the_scope(status, message, expected):
+    assert classify(status, message) == expected
 
 
 def test_network_error():

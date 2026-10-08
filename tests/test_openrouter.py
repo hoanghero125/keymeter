@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from conftest import KEY
 
+from keymeter import gateways
 from keymeter.gateways.openrouter import OpenRouter, next_reset, translate
 
 
@@ -53,6 +54,15 @@ def test_translate_exhausted_limit_reaches_budget():
     assert k["budget_reset_at"] is None
 
 
+@pytest.mark.parametrize("limit", [float("inf"), float("nan"), float("-inf")])  # JSON's Infinity and NaN
+def test_translate_limit_that_is_not_finite_is_no_limit(limit):
+    # as in the monitor: the usage still counts, and there is no budget to reset
+    d = {"usage": 3.0, "limit_remaining": 5.0, "limit_reset": "monthly"}
+    k = translate({**d, "limit": limit}, ts(2026, 10, 7))
+    assert k == translate({**d, "limit": None}, ts(2026, 10, 7))
+    assert (k["spend"], k["max_budget"], k["budget_duration"], k["budget_reset_at"]) == (3.0, None, None, None)
+
+
 def test_fetch_success(fake_gateway):
     gw = fake_gateway({"/api/v1/key": (200, {"data": {"label": "sk-or-v1-x", "usage": 3.0, "limit": 10,
                                                       "limit_remaining": 7.0, "limit_reset": "daily"}})})
@@ -60,6 +70,13 @@ def test_fetch_success(fake_gateway):
     assert snap.status == "OK"
     assert snap.key["spend"] == 3.0 and snap.key["max_budget"] == 10
     assert gw.requests == [("/api/v1/key", {}, f"Bearer {KEY}")]
+
+
+def test_bare_proxy_url_reaches_v1_key(fake_gateway):
+    # only openrouter.ai hosts get /api added; a local or forwarding proxy may serve OpenRouter's API at its root
+    gw = fake_gateway({"/v1/key": (200, {"data": {"usage": 1.0, "limit": None}})})
+    assert gateways.create("openrouter", gw.url + "/", KEY).fetch().status == "OK"
+    assert [p for p, _, _ in gw.requests] == ["/v1/key"]
 
 
 def test_fetch_auth_error(fake_gateway):

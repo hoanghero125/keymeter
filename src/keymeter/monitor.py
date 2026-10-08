@@ -8,6 +8,7 @@ resets, status changes and threshold crossings, and turns all of it into one sum
   - rate limits, key expiry, blocked state, and an event log
 """
 import csv
+import math
 import re
 import time
 from collections import deque
@@ -23,10 +24,21 @@ EVENT_LEN = 8         # events kept in the event log
 
 # ---------------------------------------------------------------- derived views
 
+def limit_of(v):
+    """A budget or per-model limit as a number, or None; NaN or inf (from an odd gateway or proxy) counts as none."""
+    b = num(v)
+    return b if b is not None and math.isfinite(b) else None
+
+
+def budget_of(d):
+    """max_budget as a number, or None; as in LiteLLM, a NaN or inf budget is no budget."""
+    return limit_of(d.get("max_budget"))
+
+
 def budget_view(d, rate, now, first_spend):
     """Spend/budget numbers for one scope (key or team) plus projections from the burn rate."""
     spend = num(d.get("spend")) or 0.0
-    budget = num(d.get("max_budget"))
+    budget = budget_of(d)
     reset = parse_time(d.get("budget_reset_at"))
     v = {
         "spend": spend,
@@ -43,10 +55,15 @@ def budget_view(d, rate, now, first_spend):
         "session_spend": spend - first_spend if first_spend is not None else None,
     }
     if budget is not None and budget >= 0:
-        v["remaining"] = max(budget - spend, 0.0)
+        # under the budget, at least $0.000001: tidy() rounds to 6 decimals, and 0 means used up
+        v["remaining"] = 0.0 if spend >= budget else max(budget - spend, 1e-6)
         v["used_pct"] = spend / budget * 100 if budget else 100.0
-        if rate:
-            v["runs_out_in_s"] = v["remaining"] / rate * 3600
+        if v["remaining"] <= 0:
+            v["runs_out_in_s"] = 0.0  # used up, whatever the rate (spend stops once the gateway refuses the key)
+        elif rate:  # at least 1 s: tidy() rounds to whole seconds, and 0 means used up
+            v["runs_out_in_s"] = max(v["remaining"] / rate * 3600, 1.0)
+    elif budget is not None:
+        v["runs_out_in_s"] = 0.0  # a negative budget: the gateway refuses spend over it, so it is used up from the start
     if rate is not None and reset and reset > now:
         v["projected_at_reset"] = spend + rate * (reset - now) / 3600
     return v
@@ -62,26 +79,34 @@ def limit_view(d):
     }
 
 
+def dict_field(d, name):
+    """A field LiteLLM sends as a dict; anything else (from an odd gateway or proxy) counts as empty."""
+    v = d.get(name)
+    return v if isinstance(v, dict) else {}
+
+
 def model_rows(k, first):
     """Per-model spend from model_spend, joined with per-model budgets (model_max_budget)."""
-    spend = {m: num(v) or 0.0 for m, v in (k.get("model_spend") or {}).items()}
-    usage = k.get("model_max_budget_usage") or {}
+    spend = {m: num(v) or 0.0 for m, v in dict_field(k, "model_spend").items()}
+    usage = dict_field(k, "model_max_budget_usage")
     limits = {}
-    for m, v in (k.get("model_max_budget") or {}).items():
+    for m, v in dict_field(k, "model_max_budget").items():
         if isinstance(v, dict):
-            limits[m] = (num(v.get("budget_limit")), v.get("time_period"))
+            limits[m] = (limit_of(v.get("budget_limit")), v.get("time_period"))
         else:
-            limits[m] = (num(v), None)
+            limits[m] = (limit_of(v), None)
+    for m, u in usage.items():  # a key on a budget tier has no model_max_budget of its own, but its usage names the limit
+        if m not in limits and isinstance(u, dict):
+            limits[m] = (limit_of(u.get("budget_limit")), u.get("time_period"))
     total = sum(spend.values())
     rows = []
     for m in sorted(set(spend) | set(limits), key=lambda m: -spend.get(m, 0.0)):
         sp = spend.get(m, 0.0)
         lim, period = limits.get(m, (None, None))
-        # per-model limits apply to spend within their time period, when the gateway reports it
+        # per-model limits apply to spend within their time period, which LiteLLM reports from 1.90 on; all-time
+        # model_spend says nothing about a limit that resets, so without it the row shows the limit alone (and no alerts)
         u = usage.get(m)
         period_spend = num(u.get("current_spend")) if isinstance(u, dict) else None
-        if period_spend is None:
-            period_spend = sp
         f0 = first.get(f"model:{m}")
         rows.append({
             "model": m,
@@ -91,20 +116,20 @@ def model_rows(k, first):
             "limit": lim,
             "period": period,
             "period_spend": period_spend,
-            "used_pct": period_spend / lim * 100 if lim else None,
+            "used_pct": period_spend / lim * 100 if lim and period_spend is not None else None,
         })
     return rows
 
 
 def team_key_rows(keys, own_key):
     rows = []
-    for k in keys:
+    for k in keys if isinstance(keys, list) else []:  # LiteLLM sends a list of dicts; anything else counts as empty
         if not isinstance(k, dict):
             continue
-        key_name = k.get("key_name") or ""
-        spend, budget = num(k.get("spend")) or 0.0, num(k.get("max_budget"))
+        key_name = str(k.get("key_name") or "")
+        spend, budget = num(k.get("spend")) or 0.0, budget_of(k)
         rows.append({
-            "key": k.get("key_alias") or key_name or (k.get("token") or "")[:10],
+            "key": k.get("key_alias") or key_name or str(k.get("token") or "")[:10],
             "spend": spend,
             "max_budget": budget,
             "used_pct": spend / budget * 100 if budget else None,
@@ -122,10 +147,11 @@ def derive_status(snap):
         return "BLOCKED"
     if t.get("blocked"):
         return "TEAM BLOCKED"
-    for d in (k, t):
-        spend, budget = num(d.get("spend")), num(d.get("max_budget"))
-        if spend is not None and budget is not None and spend >= budget:
-            return "OVER BUDGET"
+    for scope, d in (("", k), ("TEAM ", t)):
+        spend, budget = num(d.get("spend")) or 0.0, budget_of(d)
+        # as in LiteLLM: a key is refused at its budget (spend >= max_budget), a team only once over it (spend > max_budget)
+        if budget is not None and (spend > budget if scope else spend >= budget):
+            return scope + "OVER BUDGET"
     exp = parse_time(k.get("expires"))
     if exp and exp <= snap.ts:
         return "EXPIRED"
@@ -195,7 +221,8 @@ class Monitor:
         if snap.key:
             snap.status = derive_status(snap)
             if snap.status != "OK":
-                snap.message = f"gateway reports the {'team' if snap.status == 'TEAM BLOCKED' else 'key'} as {snap.status.lower()}"
+                team = snap.status.startswith("TEAM ")
+                snap.message = f"gateway reports the {'team' if team else 'key'} as {snap.status.removeprefix('TEAM ').lower()}"
         return snap
 
     def _ingest(self, snap):
@@ -239,7 +266,7 @@ class Monitor:
         self.first.setdefault("key", key_spend)
         if team_spend is not None:
             self.first.setdefault("team", team_spend)
-        for m, v in (snap.key.get("model_spend") or {}).items():
+        for m, v in dict_field(snap.key, "model_spend").items():
             if f"model:{m}" not in self.first:
                 if not fresh:
                     self._event("info", f"new model in use: {m}")
@@ -248,9 +275,9 @@ class Monitor:
         self._check_thresholds(snap)
 
     def _check_thresholds(self, snap):
-        scopes = [("key", num(snap.key.get("spend")), num(snap.key.get("max_budget")))]
+        scopes = [("key", num(snap.key.get("spend")), budget_of(snap.key))]
         if snap.team:
-            scopes.append(("team", num(snap.team.get("spend")), num(snap.team.get("max_budget"))))
+            scopes.append(("team", num(snap.team.get("spend")), budget_of(snap.team)))
         for r in model_rows(snap.key, self.first):
             if r["limit"]:
                 scopes.append((f"model {r['model']}", r["period_spend"], r["limit"]))

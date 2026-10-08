@@ -3,6 +3,7 @@
 OpenRouter reports the key's credit limit, what is left of it and how often it resets (daily, weekly
 or monthly, on UTC boundaries). It has no per-model spend, rate limits or teams.
 """
+import math
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -27,6 +28,8 @@ def next_reset(period, now):
 def translate(d, now):
     """/api/v1/key "data" -> the key fields the monitor reads."""
     limit, remaining = num(d.get("limit")), num(d.get("limit_remaining"))
+    if limit is not None and not math.isfinite(limit):
+        limit = None  # as in the monitor, a NaN or inf limit (from an odd proxy) is no limit
     reset = next_reset(d.get("limit_reset"), now) if limit is not None else None
     label = d.get("label") or ""
     return {

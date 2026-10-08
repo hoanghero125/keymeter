@@ -1,4 +1,5 @@
 """Small helpers shared by the monitor, the gateway adapters and both dashboards."""
+import math
 from datetime import datetime, timezone
 
 
@@ -58,10 +59,14 @@ def mask(key):
     return f"{key[:6]}…{key[-4:]}" if len(key) > 12 else "sk-…"
 
 
-def tidy(obj):
-    """Round floats for JSON output (spend to 6 decimals, durations to whole seconds)."""
+def tidy(obj, key=""):
+    """Round floats for JSON output (spend to 6 decimals, durations to whole seconds); NaN and inf become None."""
     if isinstance(obj, dict):
-        return {k: (round(v) if k.endswith("_s") and isinstance(v, float) else tidy(v)) for k, v in obj.items()}
+        return {k: tidy(v, k) for k, v in obj.items()}
     if isinstance(obj, list):
         return [tidy(v) for v in obj]
-    return round(obj, 6) if isinstance(obj, float) else obj
+    if not isinstance(obj, float):
+        return obj
+    if not math.isfinite(obj):  # JSON has no NaN or Infinity (the page can't parse them), and round() can't take them
+        return None
+    return round(obj) if key.endswith("_s") else round(obj, 6)

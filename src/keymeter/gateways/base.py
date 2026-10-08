@@ -1,6 +1,7 @@
 """What every gateway adapter shares: the snapshot it returns and a small read-only HTTP client."""
 import http.client
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -76,10 +77,13 @@ def classify(status, msg):
     m = msg.lower()
     if status == 0:
         return "OFFLINE"
+    # LiteLLM checks the key's team on every route, /key/info included, and names what it refused first:
+    # "Team=t1 is blocked", "Budget has been exceeded! Team=t1 ..." (but "User=u1 in Team=t1" is a member's own budget)
+    scope = "TEAM " if re.match(r"[^=]*\bteam=", m) else ""
     if "blocked" in m:
-        return "BLOCKED"
+        return scope + "BLOCKED"
     if "budget" in m:
-        return "OVER BUDGET"
+        return scope + "OVER BUDGET"
     if "expired" in m:
         return "EXPIRED"
     if status == 429:

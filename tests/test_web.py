@@ -1,15 +1,18 @@
 import json
+import socket
 import threading
 import time
 import urllib.error
 import urllib.request
 
 import pytest
-from conftest import KEY
+from conftest import KEY, Scripted, ok
 
 from keymeter.gateways import LiteLLM
 from keymeter.monitor import Monitor
-from keymeter.web import make_server
+from keymeter.web import Poller, make_server
+
+T0 = 1_800_000_000.0
 
 
 @pytest.fixture
@@ -56,6 +59,22 @@ def test_state(dashboard):
     assert get(dashboard, f"/api/state?since={d['history'][0][0]}")[2]["history"] == []
 
 
+@pytest.mark.parametrize("spends", [(0.0, 1e-300), ("nan", "nan")], ids=["tiny spend step", "spend not a number"])
+def test_numbers_that_are_not_finite_keep_the_poller_alive(args, spends):
+    # the second poll measures a burn rate that runs out in inf (or NaN) seconds: the poller must keep polling,
+    # and the page's JSON.parse takes no NaN or Infinity
+    poller = Poller(Monitor(Scripted(*(ok(T0 + 600 * i, spend=s, max_budget=1e9) for i, s in enumerate(spends))), args))
+    poller.start()
+    deadline = time.time() + 5
+    while poller.version < 2:
+        assert poller.is_alive() and time.time() < deadline, "the poller stopped"
+        if poller.version == 1:
+            poller.poll_now()
+        time.sleep(0.02)
+    d = json.loads(json.dumps(poller.state(0), allow_nan=False))
+    assert d["summary"]["status"] == "OK" and d["summary"]["key_info"]["runs_out_in_s"] is None
+
+
 def test_state_never_contains_the_key(dashboard):
     assert KEY not in json.dumps(get(dashboard, "/api/state")[2])
 
@@ -86,6 +105,21 @@ def test_answers_only_localhost_names_on_loopback(dashboard):
     assert request(dashboard, "/api/state", f"[::1]:{port}") == 200
     assert request(dashboard, "/api/state", f"evil.example:{port}") == 403  # DNS rebinding
     assert request(dashboard, "/", "evil.example") == 403
+
+
+def test_malformed_host_header_is_a_bad_request(dashboard):
+    req = urllib.request.Request(dashboard + "/api/state", headers={"Host": "["})
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(req)
+    assert e.value.code == 400 and json.loads(e.value.read()) == {"error": "malformed request target or Host header"}
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_malformed_request_target_is_a_bad_request(dashboard, method):
+    # an absolute-form target urlparse can't read must get an answer, not a dropped connection and a traceback
+    with socket.create_connection(("127.0.0.1", int(dashboard.rsplit(":", 1)[1])), timeout=5) as s:
+        s.sendall(f"{method} http://[/api/state HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n".encode())
+        assert s.makefile("rb").readline().split()[1:2] == [b"400"]
 
 
 def test_listens_on_ipv6_loopback(args):

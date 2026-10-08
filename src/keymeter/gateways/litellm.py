@@ -15,6 +15,7 @@ class LiteLLM:
     def __init__(self, url, key, team=True):
         self.url, self.key = url, key
         self.team_allowed = team
+        self.team_denied = ""   # the 401/403 that stopped /team/info queries, reported again on every later poll
         self.key_param = False  # older LiteLLM versions need /key/info?key=...
 
     def fetch(self):
@@ -38,5 +39,8 @@ class LiteLLM:
                 snap.team_error = f"HTTP {ts}: {error_text(tbody)}"[:160]
                 if ts in (401, 403):
                     self.team_allowed = False
+                    self.team_denied = snap.team_error
                     snap.notices.append("this key can't read /team/info — showing key data only")
+        elif team_id:
+            snap.team_error = self.team_denied  # "" when the team is off (--no-team)
         return snap

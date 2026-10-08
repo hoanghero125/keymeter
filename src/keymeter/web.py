@@ -9,6 +9,7 @@ Endpoints:
   POST /api/poll            poll the gateway now
 """
 import json
+import math
 import socket
 import sys
 import threading
@@ -56,8 +57,9 @@ class Poller(threading.Thread):
             mon.polling = False
             mon.next_poll_at = time.time() + mon.next_delay()
             with self.lock:
-                if snap.key:
-                    self.history.append([round(snap.ts, 3), round(num(snap.key.get("spend")) or 0.0, 6)])
+                spend = num(snap.key.get("spend")) or 0.0
+                if snap.key and math.isfinite(spend):  # a NaN or inf spend has no place on the chart, nor in JSON
+                    self.history.append([round(snap.ts, 3), round(spend, 6)])
                 if mon.bell:
                     self.bell_seq += 1
                     mon.bell = False
@@ -109,9 +111,9 @@ class Handler(BaseHTTPRequestHandler):
     loopback_only = False   # True when listening on a loopback address
 
     def do_GET(self):
-        if not self._host_ok():
+        url = self._target()
+        if url is None:
             return
-        url = urlparse(self.path)
         if url.path == "/api/state":
             try:
                 since = float(parse_qs(url.query).get("since", ["0"])[0])
@@ -124,21 +126,27 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
-        if not self._host_ok():
+        url = self._target()
+        if url is None:
             return
-        if urlparse(self.path).path == "/api/poll":
+        if url.path == "/api/poll":
             return self._json(202, {"queued": self.poller.poll_now()})
         self._json(404, {"error": "not found"})
 
-    def _host_ok(self):
-        """On a loopback address, answer only requests addressed to localhost. This stops a web page from
-        reading the dashboard through DNS rebinding (pointing its own domain at 127.0.0.1)."""
-        host = urlparse("//" + (self.headers.get("Host") or "")).hostname
+    def _target(self):
+        """The parsed request target, or None once an error has been sent. On a loopback address, answer only
+        requests addressed to localhost. This stops a web page from reading the dashboard through DNS rebinding
+        (pointing its own domain at 127.0.0.1)."""
+        try:
+            url, host = urlparse(self.path), urlparse("//" + (self.headers.get("Host") or "")).hostname
+        except ValueError:  # a malformed request target or Host header, such as "http://[/" or "["
+            self._json(400, {"error": "malformed request target or Host header"})
+            return None
         if not self.loopback_only or host is None or host in LOOPBACK:
-            return True
+            return url
         self._json(403, {"error": "keymeter answers only requests addressed to localhost; "
                                   "run it with --host 0.0.0.0 to serve other host names"})
-        return False
+        return None
 
     def _json(self, status, obj):
         self._send(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")

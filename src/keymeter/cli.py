@@ -1,6 +1,7 @@
 """Command line: `keymeter web`, `keymeter tui` and `keymeter json`.
 
-Settings come from the environment, then from a .env file (the current directory's, or --env FILE):
+Settings come from the environment (empty variables count as unset), then from a .env file: --env FILE is always
+read, the default ./.env only when KEYMETER_KEY is not already set in the environment.
   KEYMETER_KEY      the API key to watch (required)
   KEYMETER_URL      gateway base URL (default depends on the gateway)
   KEYMETER_GATEWAY  auto, litellm or openrouter (default auto)
@@ -16,8 +17,13 @@ from keymeter.monitor import Monitor
 from keymeter.util import tidy
 
 
+def env(name):
+    """An environment variable without surrounding blanks and quotes ("" when unset; cmd's `set NAME=""` keeps the quotes)."""
+    return os.environ.get(name, "").strip().strip('"')
+
+
 def load_env(path, required):
-    """Minimal .env reader (KEY=VALUE lines); real environment variables win."""
+    """Minimal .env reader (KEY=VALUE lines); real environment variables win unless they are empty."""
     if not path.is_file():
         if required:
             sys.exit(f"--env file not found: {path}")
@@ -32,18 +38,20 @@ def load_env(path, required):
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        if not env(k.strip()):  # `export KEYMETER_KEY=` must not hide the file's key
+            os.environ[k.strip()] = v.strip().strip('"').strip("'")
 
 
 def build_parser():
     conn = argparse.ArgumentParser(add_help=False)
     g = conn.add_argument_group("gateway")
     g.add_argument("--gateway", choices=["auto", *gateways.GATEWAYS],
-                   help="gateway type (default: $KEYMETER_GATEWAY or auto: openrouter for openrouter.ai URLs "
-                        "and sk-or- keys, litellm otherwise)")
+                   help="gateway type (default: $KEYMETER_GATEWAY or auto: openrouter when the URL's host is openrouter.ai "
+                        "or a subdomain of it, or, if no URL is set, when the key starts with sk-or-; litellm otherwise)")
     g.add_argument("--url", help="gateway base URL (default: $KEYMETER_URL, else http://localhost:4000 for "
                                  "litellm or https://openrouter.ai/api for openrouter)")
-    g.add_argument("--env", metavar="FILE", help="read settings from this file (default: .env in the current directory)")
+    g.add_argument("--env", metavar="FILE", help="read settings from this file (default: ./.env, read only when KEYMETER_KEY "
+                                                 "is not already set in the environment)")
 
     watch = argparse.ArgumentParser(add_help=False)
     w = watch.add_argument_group("monitoring")
@@ -88,17 +96,17 @@ def main(argv=None):
     args.interval = max(args.interval, 1)
     if args.env:
         load_env(Path(args.env), required=True)
-    elif not os.environ.get("KEYMETER_KEY"):
+    elif not env("KEYMETER_KEY"):
         # ./.env is only a fallback for the key itself: a .env in whatever directory you are in (a cloned
         # repo, say) must not point a key from your environment at another server
         load_env(Path(".env"), required=False)
-    key = os.environ.get("KEYMETER_KEY", "").strip().strip('"')
+    key = env("KEYMETER_KEY")
     if not key:
         sys.exit("KEYMETER_KEY is not set. Put it in a .env file in this directory, pass --env FILE, or export it.")
-    name = (args.gateway or os.environ.get("KEYMETER_GATEWAY") or "auto").strip().lower()
+    name = (args.gateway or env("KEYMETER_GATEWAY") or "auto").lower()
     team = args.command != "web" and not args.no_team  # the web dashboard covers the key only
     try:
-        gw = gateways.create(name, args.url or os.environ.get("KEYMETER_URL"), key, team=team)
+        gw = gateways.create(name, args.url or env("KEYMETER_URL"), key, team=team)
     except ValueError as e:
         sys.exit(str(e))
     mon = Monitor(gw, args)
