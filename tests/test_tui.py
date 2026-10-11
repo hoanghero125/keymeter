@@ -442,3 +442,24 @@ def test_negative_budget_is_used_up(args):
     s["key_info"]["runs_out_in_s"] = None
     line = next(ln for ln in text_of(render_burn(s, args, T0 + 600)).splitlines() if "Runs out in" in ln)
     assert "used up" in line
+
+
+def test_balance_shows_what_is_left_and_when_it_runs_out(args):
+    mon = polled(args, ok(T0, balance=10.0, available=True, spend=0.0), ok(T0 + 600, balance=9.5, available=True, spend=0.5))
+    s = mon.summary()
+    out = text_of(render_budget(s, args))
+    assert "Balance" in out and "$9.500 left" in out and "shared by every key on the account" in out
+    assert "no budget cap" not in out
+    line = next(ln for ln in text_of(render_burn(s, args, T0 + 600)).splitlines() if "Runs out in" in ln)
+    assert "3h 10m" in line  # $9.50 at $3/h
+
+
+def test_used_up_balance_says_so(args):
+    mon = polled(args, ok(T0, balance=0.0, available=False, spend=0.0))
+    s = mon.summary()
+    assert "$0.0000 left" in text_of(render_budget(s, args))
+    line = next(ln for ln in text_of(render_burn(s, args, T0)).splitlines() if "Runs out in" in ln)
+    assert "used up" in line
+    console = Console(file=io.StringIO(), width=120, record=True)
+    console.print(render(mon, console, once=True))
+    assert "NO BALANCE" in console.export_text()

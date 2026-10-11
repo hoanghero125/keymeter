@@ -4,7 +4,7 @@ Settings come from the environment (empty variables count as unset), then from a
 read, the default ./.env only when KEYMETER_KEY is not already set in the environment.
   KEYMETER_KEY      the API key to watch (required)
   KEYMETER_URL      gateway base URL (default depends on the gateway)
-  KEYMETER_GATEWAY  auto, litellm or openrouter (default auto)
+  KEYMETER_GATEWAY  auto, litellm, openrouter or deepseek (default auto)
 """
 import argparse
 import json
@@ -47,9 +47,10 @@ def build_parser():
     g = conn.add_argument_group("gateway")
     g.add_argument("--gateway", choices=["auto", *gateways.GATEWAYS],
                    help="gateway type (default: $KEYMETER_GATEWAY or auto: openrouter when the URL's host is openrouter.ai "
-                        "or a subdomain of it, or, if no URL is set, when the key starts with sk-or-; litellm otherwise)")
+                        "or a subdomain of it, or, if no URL is set, when the key starts with sk-or-; deepseek when the URL's "
+                        "host is deepseek.com or a subdomain of it; litellm otherwise)")
     g.add_argument("--url", help="gateway base URL (default: $KEYMETER_URL, else http://localhost:4000 for "
-                                 "litellm or https://openrouter.ai/api for openrouter)")
+                                 "litellm, https://openrouter.ai/api for openrouter or https://api.deepseek.com for deepseek)")
     g.add_argument("--env", metavar="FILE", help="read settings from this file (default: ./.env, read only when KEYMETER_KEY "
                                                  "is not already set in the environment)")
 
@@ -63,7 +64,7 @@ def build_parser():
 
     p = argparse.ArgumentParser(
         prog="keymeter",
-        description="Live spend, budget and burn rate for one LiteLLM or OpenRouter API key.",
+        description="Live spend, budget and burn rate for one LiteLLM, OpenRouter or DeepSeek API key.",
         epilog="The key is read from KEYMETER_KEY (environment or .env). Run `keymeter COMMAND -h` for a command's options.")
     p.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")

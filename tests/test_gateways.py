@@ -1,7 +1,7 @@
 import pytest
 
 from keymeter import gateways
-from keymeter.gateways import LiteLLM, OpenRouter
+from keymeter.gateways import DeepSeek, LiteLLM, OpenRouter
 
 
 @pytest.mark.parametrize(("url", "key", "expected"), [
@@ -11,6 +11,9 @@ from keymeter.gateways import LiteLLM, OpenRouter
     ("https://eu.openrouter.ai/api", "sk-1234", "openrouter"),
     ("https://llm.example.com", "sk-or-v1-abc", "litellm"),  # an explicit URL decides
     ("https://notopenrouter.ai", "sk-1234", "litellm"),
+    ("https://api.deepseek.com", "sk-1234", "deepseek"),
+    ("https://api.deepseek.com/v1", "sk-or-v1-abc", "deepseek"),
+    ("https://deepseek.com.example.net", "sk-1234", "litellm"),
 ])
 def test_detect(url, key, expected):
     assert gateways.detect(url, key) == expected
@@ -21,6 +24,8 @@ def test_create_uses_default_urls():
     assert isinstance(lite, LiteLLM) and lite.url == "http://localhost:4000"
     router = gateways.create("auto", None, "sk-or-v1-abc")
     assert isinstance(router, OpenRouter) and router.url == "https://openrouter.ai/api"
+    deepseek = gateways.create("deepseek", None, "sk-1234")
+    assert isinstance(deepseek, DeepSeek) and deepseek.url == "https://api.deepseek.com"
 
 
 @pytest.mark.parametrize("url", ["https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/", "https://openrouter.ai/api/"])
@@ -47,7 +52,7 @@ def test_create_passes_team_flag_to_litellm():
 
 
 def test_create_rejects_unknown_gateway():
-    with pytest.raises(ValueError, match="unknown gateway 'openai'"):
+    with pytest.raises(ValueError, match="unknown gateway 'openai': use auto, litellm, openrouter or deepseek"):
         gateways.create("openai", None, "sk-1234")
 
 

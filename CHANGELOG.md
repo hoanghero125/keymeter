@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- DeepSeek support (`--gateway deepseek`, or a URL on `deepseek.com`): keymeter reads the account's
+  prepaid USD balance from `GET /user/balance` and shows it with the burn rate and when the balance runs
+  out. The spend is what the balance went down by since keymeter started. New status `NO BALANCE` when
+  DeepSeek says the balance can't pay for requests or it is zero; `json` exits with 1 then. The `json`
+  summary's `key_info` and `team_info` gain a `balance` field, null on LiteLLM and OpenRouter.
+- Web: the run-out tile no longer says "before the budget resets" for a budget that never resets.
+
 ## 0.1.1 (2026-10-08)
 
 - A used-up budget reads as used up even when nothing is being spent: `runs_out_in_s` is 0, and the

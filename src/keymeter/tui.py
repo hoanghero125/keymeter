@@ -121,6 +121,10 @@ def render_budget(s, args, limit=None):
     for label, v in (("Key", s["key_info"]), ("Team", s.get("team_info"))):
         if not v:
             continue
+        if v["balance"] is not None:  # a prepaid balance (DeepSeek): no budget, % used or reset
+            g.add_row("Balance", Text(f"{usd(v['balance'])} left", style="red" if v["balance"] <= 0 else "cyan"))
+            g.add_row("", Text("prepaid, shared by every key on the account", style="dim"))
+            continue
         style = pct_style(v["used_pct"], args)
         if v["used_pct"] is not None:
             g.add_row(label, bar(v["used_pct"], style, v["spend"], v["max_budget"]))
@@ -147,7 +151,7 @@ def render_budget(s, args, limit=None):
         g.add_row("Model", line)
     if limit is not None and len(rows) > limit:
         g.add_row("Model", Text(f"… and {len(rows) - limit} more" if limit else f"{len(rows)} hidden", style="dim"))
-    return Panel(g, title="Budget", title_align="left")
+    return Panel(g, title="Balance" if s["key_info"]["balance"] is not None else "Budget", title_align="left")
 
 
 def render_burn(s, args, now):
@@ -168,10 +172,11 @@ def render_burn(s, args, now):
         return Text(f"+{usd(v['session_spend'])} in {fmt_dur(s['session_s'])}")
 
     def cell_runout(v):
-        if v["max_budget"] is None:
+        if v["max_budget"] is None and v["balance"] is None:
             return Text("no cap", style="dim")
         # a negative budget has no remaining, but the gateway (and the status line) count any spend as over it
-        if v["runs_out_in_s"] == 0 or v["max_budget"] < 0 or (v["remaining"] is not None and v["remaining"] <= 0):
+        negative = v["max_budget"] is not None and v["max_budget"] < 0
+        if v["runs_out_in_s"] == 0 or negative or (v["remaining"] is not None and v["remaining"] <= 0):
             return Text("used up", style="red")
         if v["burn_per_hour"] is None:
             return Text("measuring…", style="dim")
@@ -429,6 +434,11 @@ def run(mon, args):
     msg = f"Stopped after {mon.polls} polls ({mon.fails} failed)."
     if ki and ki["session_spend"] is not None:
         msg += f" Key spend this session: +{usd(ki['session_spend'])}, now {usd(ki['spend'])}"
-        msg += f" of {usd(ki['max_budget'])}." if ki["max_budget"] else "."
+        if ki["max_budget"]:
+            msg += f" of {usd(ki['max_budget'])}."
+        elif ki["balance"] is not None:
+            msg += f"; balance {usd(ki['balance'])}."
+        else:
+            msg += "."
     console.print(msg)
     return 0

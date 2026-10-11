@@ -14,7 +14,7 @@ def test_help_states_the_auto_rule_and_when_dotenv_is_read(monkeypatch, capsys):
         main(["json", "-h"])
     out = capsys.readouterr().out
     assert ("auto: openrouter when the URL's host is openrouter.ai or a subdomain of it, or, if no URL is set, when the key "
-            "starts with sk-or-; litellm otherwise") in out
+            "starts with sk-or-; deepseek when the URL's host is deepseek.com or a subdomain of it; litellm otherwise") in out
     assert "(default: ./.env, read only when KEYMETER_KEY is not already set in the environment)" in out
 
 
@@ -141,3 +141,16 @@ def test_team_at_its_budget_exits_0(clean_env, fake_gateway, monkeypatch, capsys
     assert main(["json", "--url", gw.url]) == 0
     s = json.loads(capsys.readouterr().out)
     assert (s["status"], s["team_info"]["runs_out_in_s"]) == ("OK", 0)
+
+
+def test_json_and_tui_once_on_deepseek(clean_env, fake_gateway, monkeypatch, capsys):
+    gw = fake_gateway({"/user/balance": (200, {"is_available": True, "balance_infos": [
+        {"currency": "USD", "total_balance": "8.42", "granted_balance": "0.00", "topped_up_balance": "8.42"}]})})
+    monkeypatch.setenv("KEYMETER_KEY", KEY)
+    assert main(["json", "--url", gw.url, "--gateway", "deepseek"]) == 0
+    s = json.loads(capsys.readouterr().out)
+    assert s["status"] == "OK" and s["gateway_type"] == "deepseek" and s["features"] == []
+    assert (s["key_info"]["balance"], s["key_info"]["remaining"], s["key_info"]["spend"]) == (8.42, 8.42, 0.0)
+    assert main(["tui", "--once", "--url", gw.url, "--gateway", "deepseek"]) == 0
+    out = capsys.readouterr().out
+    assert "keymeter · deepseek" in out and "$8.420 left" in out

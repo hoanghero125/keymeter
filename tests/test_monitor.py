@@ -132,6 +132,9 @@ def test_notices_and_new_models_become_events(args):
     ({"spend": 1, "max_budget": 10}, {"spend": 0, "max_budget": 0}, "OK"),
     ({"spend": 1, "max_budget": 10}, {"spend": 50.5, "max_budget": 50}, "TEAM OVER BUDGET"),
     ({"spend": 1, "expires": "2020-01-01T00:00:00Z"}, {}, "EXPIRED"),
+    ({"spend": 0, "balance": 5.0, "available": True}, {}, "OK"),
+    ({"spend": 0, "balance": 5.0, "available": False}, {}, "NO BALANCE"),
+    ({"spend": 0, "balance": 0.0, "available": True}, {}, "NO BALANCE"),
 ])
 def test_derive_status(key, team, expected):
     assert derive_status(Snapshot(T0, "OK", key=key, team=team)) == expected
@@ -344,3 +347,34 @@ def test_csv_log_leaves_numbers_that_are_not_finite_empty(args, tmp_path):
     with open(args.log, newline="", encoding="utf-8") as f:
         row = list(csv.reader(f))[1]
     assert row[2:6] == ["", "", "1.0", ""]
+
+
+def test_balance_runs_out_at_the_burn_rate(args):
+    # DeepSeek: a prepaid balance with no budget; spend is what the balance went down by
+    mon = run(args, ok(T0, balance=10.0, available=True, spend=0.0), ok(T0 + 600, balance=9.5, available=True, spend=0.5))
+    s = mon.summary()
+    ki = s["key_info"]
+    assert s["status"] == "OK"
+    assert (ki["balance"], ki["remaining"], ki["max_budget"], ki["used_pct"]) == (9.5, 9.5, None, None)
+    assert ki["burn_per_hour"] == pytest.approx(3.0)
+    assert ki["runs_out_in_s"] == pytest.approx(9.5 / 3.0 * 3600)
+    assert ki["projected_at_reset"] is None
+    assert not [e for e in mon.events if e[1] in ("warn", "crit")]  # no budget, so no threshold alerts
+
+
+def test_balance_without_spend_does_not_run_out(args):
+    ki = run(args, ok(T0, balance=10.0, spend=0.0), ok(T0 + 600, balance=10.0, spend=0.0)).summary()["key_info"]
+    assert ki["burn_per_hour"] == 0.0 and ki["runs_out_in_s"] is None
+
+
+def test_budget_view_has_no_balance_for_a_budget():
+    assert budget_view({"spend": 1.0, "max_budget": 10}, None, T0, None)["balance"] is None
+
+
+@pytest.mark.parametrize("key", [{"balance": 0.0, "available": False}, {"balance": 2.0, "available": False},
+                                 {"balance": 0.0, "available": True}, {"balance": -0.05}])
+def test_used_up_balance_is_no_balance(args, key):
+    s = run(args, ok(T0, spend=0.0, **key)).summary()
+    assert (s["status"], s["message"]) == ("NO BALANCE", "gateway reports no balance left on the account")
+    assert s["key_info"]["remaining"] == max(key["balance"], 0.0)
+    assert s["key_info"]["runs_out_in_s"] == (0.0 if key["balance"] <= 0 else None)

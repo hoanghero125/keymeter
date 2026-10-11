@@ -4,8 +4,9 @@
 [![PyPI](https://img.shields.io/pypi/v/keymeter)](https://pypi.org/project/keymeter/)
 
 A live dashboard for one LLM gateway API key: how much of its budget is spent, how fast it is going,
-and when it will run out. It works with a [LiteLLM](https://github.com/BerriAI/litellm) proxy or
-[OpenRouter](https://openrouter.ai), in the browser or in the terminal.
+and when it will run out. It works with a [LiteLLM](https://github.com/BerriAI/litellm) proxy,
+[OpenRouter](https://openrouter.ai) or [DeepSeek](https://platform.deepseek.com), in the browser or in
+the terminal.
 
 ![keymeter in the browser](https://raw.githubusercontent.com/hoanghero125/keymeter/main/docs/screenshot.png)
 
@@ -13,7 +14,7 @@ LiteLLM's admin UI needs an admin key. keymeter only needs the key you were hand
 you have: a team key at work, a key for a hackathon or a course. It polls the gateway's read-only key
 endpoint (no tokens spent) and shows:
 
-- spend vs. budget, what is left, and when the budget resets
+- spend vs. budget, what is left, and when the budget resets (on DeepSeek, the account's balance)
 - the burn rate over the last 15 minutes, when the budget runs out at that rate, and the projected
   spend at reset
 - charts of spend over time and spend per interval, with a table view
@@ -49,10 +50,20 @@ export KEYMETER_KEY=sk-or-v1-...
 keymeter web
 ```
 
+**DeepSeek**
+
+```bash
+export KEYMETER_URL=https://api.deepseek.com
+export KEYMETER_KEY=sk-...
+keymeter web
+```
+
 Then open <http://localhost:8765>. keymeter picks the gateway by itself: OpenRouter when the URL's
 host is `openrouter.ai` or a subdomain of it, or, if no URL is set, when the key starts with `sk-or-`;
-LiteLLM otherwise.
-So OpenRouter needs no URL, and a bare `https://openrouter.ai` works too.
+DeepSeek when the URL's host is `deepseek.com` or a subdomain of it; LiteLLM otherwise.
+So OpenRouter needs no URL, and a bare `https://openrouter.ai` works too. A DeepSeek key looks like a
+LiteLLM one, so DeepSeek needs the URL, or `--gateway deepseek` (which defaults to
+`https://api.deepseek.com`).
 
 On Windows PowerShell, set the variables with `$env:KEYMETER_KEY = "sk-..."`. You can also put
 them in a `.env` file instead (see [Configuration](https://github.com/hoanghero125/keymeter#configuration)).
@@ -70,8 +81,8 @@ Options (`keymeter COMMAND -h` lists them per command):
 
 | Option | Default | |
 |---|---|---|
-| `--gateway` | `auto` | `litellm`, `openrouter`, or `auto` to pick from the URL's host, or from the key when no URL is set |
-| `--url` | depends on the gateway | gateway base URL; `http://localhost:4000` for LiteLLM, `https://openrouter.ai/api` for OpenRouter. A trailing `/v1` is fine, and so is a bare `https://openrouter.ai`. |
+| `--gateway` | `auto` | `litellm`, `openrouter`, `deepseek`, or `auto` to pick from the URL's host, or from the key when no URL is set |
+| `--url` | depends on the gateway | gateway base URL; `http://localhost:4000` for LiteLLM, `https://openrouter.ai/api` for OpenRouter, `https://api.deepseek.com` for DeepSeek. A trailing `/v1` is fine, and so is a bare `https://openrouter.ai`. |
 | `--env FILE` | `.env` | where to read settings from; `./.env` is skipped when `KEYMETER_KEY` is already set in the environment |
 | `-i`, `--interval` | `15` | seconds between polls (`web`, `tui`) |
 | `--window` | `15` | burn-rate window in minutes (`web`, `tui`) |
@@ -90,7 +101,7 @@ current directory (or the file given with `--env`). An empty variable counts as 
 |---|---|
 | `KEYMETER_KEY` | the API key to watch (required) |
 | `KEYMETER_URL` | gateway base URL |
-| `KEYMETER_GATEWAY` | `auto`, `litellm` or `openrouter` |
+| `KEYMETER_GATEWAY` | `auto`, `litellm`, `openrouter` or `deepseek` |
 
 Copy [`.env.example`](https://github.com/hoanghero125/keymeter/blob/main/.env.example) to `.env` to start.
 keymeter reads `./.env` only when `KEYMETER_KEY` is not set in the environment (a file you name with
@@ -106,13 +117,13 @@ can read the key when the gateway URL is plain `http://`. Pass `--env` only file
 
 ## What each gateway reports
 
-| | LiteLLM | OpenRouter |
-|---|---|---|
-| Spend, budget, reset time, burn rate, projections | yes | yes |
-| Key expiry | yes | yes |
-| Spend per model, per-model budgets | yes | no |
-| Rate limits, allowed models, blocked state | yes | no |
-| Team budget and team keys (`tui`, `json`) | yes | no |
+| | LiteLLM | OpenRouter | DeepSeek |
+|---|---|---|---|
+| Spend, budget, reset time, burn rate, projections | yes | yes | balance, burn rate and run-out time only |
+| Key expiry | yes | yes | no |
+| Spend per model, per-model budgets | yes | no | no |
+| Rate limits, allowed models, blocked state | yes | no | no |
+| Team budget and team keys (`tui`, `json`) | yes | no | no |
 
 keymeter shows how much of a per-model budget is used only on LiteLLM 1.90 or newer, which reports
 the spend in each budget's period. Older versions report only all-time spend per model, so keymeter
@@ -121,6 +132,13 @@ shows the limit alone, with no percentage and no alerts.
 On OpenRouter the budget is the key's credit limit. The spend shown is what counts against that limit
 in the current period. Limits reset at 00:00 UTC: daily, weekly on Monday, or on the 1st of the month.
 A key without a limit shows its all-time usage and no budget.
+
+DeepSeek reports only the account's prepaid balance, which every key on the account shares. keymeter
+shows that balance where the other gateways show the budget left, and when it runs out at the current
+burn rate. The spend is what the balance went down by since keymeter started; a top-up adds nothing to
+it (spend in the same poll interval as a top-up is missed). The status reads `NO BALANCE` once DeepSeek
+says the balance can't pay for requests, or the balance is zero, and `json` exits with 1 then. keymeter
+reads the USD balance only: an account whose balance is in CNY reads `ERROR`.
 
 ## Running it on a server
 
@@ -151,8 +169,9 @@ itself) and press "Poll now". If you do this, allow only your own IP in the fire
 
 ## How it works
 
-- keymeter calls `GET /key/info` on LiteLLM (plus `/team/info` for `tui` and `json`), or
-  `GET /api/v1/key` on OpenRouter. These endpoints are read-only and cost nothing.
+- keymeter calls `GET /key/info` on LiteLLM (plus `/team/info` for `tui` and `json`),
+  `GET /api/v1/key` on OpenRouter, or `GET /user/balance` on DeepSeek. These endpoints are read-only
+  and cost nothing.
 - The burn rate is the spend added over the burn-rate window, per hour. When spend goes down,
   keymeter takes it as a budget reset and starts measuring again.
 - When the gateway stops answering, polls back off to at most once a minute. The dashboard keeps
@@ -184,8 +203,8 @@ The web UI is plain HTML, CSS and JavaScript in `src/keymeter/static`, with no b
 
 To support another gateway, add an adapter in `src/keymeter/gateways/`. It fetches the key's data
 and translates it into the field names the rest of keymeter uses (LiteLLM's); see `openrouter.py`
-for a small example. Then register it in `gateways/__init__.py`: add it to `GATEWAYS` and to
-`create()`, which builds the adapter, and to `detect()` if `auto` should pick it.
+for a small example. Then register it in `gateways/__init__.py`: add it to `GATEWAYS`, from which
+`create()` builds the adapter, and to `detect()` if `auto` should pick it.
 
 ### Releasing
 
@@ -200,4 +219,4 @@ the environment, update the publisher to match.
 
 ## License
 
-[MIT](https://github.com/hoanghero125/keymeter/blob/main/LICENSE). keymeter is not affiliated with LiteLLM (BerriAI) or OpenRouter.
+[MIT](https://github.com/hoanghero125/keymeter/blob/main/LICENSE). keymeter is not affiliated with LiteLLM (BerriAI), OpenRouter or DeepSeek.

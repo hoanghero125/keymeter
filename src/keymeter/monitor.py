@@ -2,7 +2,7 @@
 
 Monitor polls a gateway adapter, keeps the spend samples inside the burn-rate window, notices budget
 resets, status changes and threshold crossings, and turns all of it into one summary dict:
-  - spend vs. budget, remaining, % used, time until the budget resets
+  - spend vs. budget, remaining, % used, time until the budget resets (or a prepaid balance)
   - burn rate ($/h), when the budget runs out at that rate, projected spend at reset
   - spend per model and per team key (when the gateway reports them)
   - rate limits, key expiry, blocked state, and an event log
@@ -39,10 +39,12 @@ def budget_view(d, rate, now, first_spend):
     """Spend/budget numbers for one scope (key or team) plus projections from the burn rate."""
     spend = num(d.get("spend")) or 0.0
     budget = budget_of(d)
+    balance = limit_of(d.get("balance"))
     reset = parse_time(d.get("budget_reset_at"))
     v = {
         "spend": spend,
         "max_budget": budget,
+        "balance": balance,
         "soft_budget": num(d.get("soft_budget")),
         "remaining": None,
         "used_pct": None,
@@ -64,6 +66,12 @@ def budget_view(d, rate, now, first_spend):
             v["runs_out_in_s"] = max(v["remaining"] / rate * 3600, 1.0)
     elif budget is not None:
         v["runs_out_in_s"] = 0.0  # a negative budget: the gateway refuses spend over it, so it is used up from the start
+    elif balance is not None:  # a prepaid balance (DeepSeek): what is left, with no budget, % used or reset
+        v["remaining"] = max(balance, 0.0)
+        if balance <= 0:
+            v["runs_out_in_s"] = 0.0
+        elif rate:
+            v["runs_out_in_s"] = max(balance / rate * 3600, 1.0)
     if rate is not None and reset and reset > now:
         v["projected_at_reset"] = spend + rate * (reset - now) / 3600
     return v
@@ -147,6 +155,9 @@ def derive_status(snap):
         return "BLOCKED"
     if t.get("blocked"):
         return "TEAM BLOCKED"
+    balance = limit_of(k.get("balance"))
+    if k.get("available") is False or (balance is not None and balance <= 0):
+        return "NO BALANCE"
     for scope, d in (("", k), ("TEAM ", t)):
         spend, budget = num(d.get("spend")) or 0.0, budget_of(d)
         # as in LiteLLM: a key is refused at its budget (spend >= max_budget), a team only once over it (spend > max_budget)
@@ -220,7 +231,9 @@ class Monitor:
             self._event("info", text)
         if snap.key:
             snap.status = derive_status(snap)
-            if snap.status != "OK":
+            if snap.status == "NO BALANCE":
+                snap.message = "gateway reports no balance left on the account"
+            elif snap.status != "OK":
                 team = snap.status.startswith("TEAM ")
                 snap.message = f"gateway reports the {'team' if team else 'key'} as {snap.status.removeprefix('TEAM ').lower()}"
         return snap

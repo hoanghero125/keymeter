@@ -15,7 +15,7 @@ const STATUS = {
 };
 const EVENT_STYLE = { good: ['good', 'circle-check'], info: ['neutral', 'info'], warn: ['warning', 'triangle-alert'], crit: ['critical', 'octagon-x'] };
 const FAVICON_COLOR = { good: '#0ca30c', warning: '#fab219', critical: '#d03b3b', neutral: '#2a78d6' };
-const GATEWAY_NAME = { litellm: 'LiteLLM', openrouter: 'OpenRouter' };
+const GATEWAY_NAME = { litellm: 'LiteLLM', openrouter: 'OpenRouter', deepseek: 'DeepSeek' };
 
 const S = {
   boot: null, version: -1, data: null, history: [], offset: 0,
@@ -505,6 +505,10 @@ function levelTag(pct) {
 function budgetTile(v) {
   const label = text => h('div', { class: 'tile-label', text });
   const tile = h('section', { class: 'card tile tile-hero' });
+  if (v.balance != null) {  // a prepaid balance (DeepSeek): what is left, with no budget, % used or reset
+    return add(tile, [label('Balance'), h('div', { class: `tile-value${v.balance <= 0 ? ' t-crit' : ''}` }, counter('left', v.balance, usd)),
+      h('p', { class: 'tile-sub', text: 'Prepaid, shared by every key on the account' })]);
+  }
   if (v.max_budget == null) {
     return add(tile, [label('Key spend'), h('div', { class: 'tile-value' }, counter('spend', v.spend, usd)),
       h('p', { class: 'tile-sub', text: 'No budget cap on this key' })]);
@@ -530,17 +534,20 @@ function burnTile(v) {
     h('p', { class: 'tile-sub', text: `Over the last ${fmtMin(S.data.config.window)}` }));
 }
 
-// A budget with nothing left, whatever the burn rate (monitor sets runs_out_in_s to 0 then). A negative budget
-// has no remaining or % used, but the gateway counts any spend as over it.
-const usedUp = v => v.max_budget != null && (v.max_budget < 0 || v.runs_out_in_s === 0 || (v.remaining != null && v.remaining <= 0));
+// A budget or balance with nothing left, whatever the burn rate (monitor sets runs_out_in_s to 0 then). A negative
+// budget has no remaining or % used, but the gateway counts any spend as over it.
+const capped = v => v.max_budget != null || v.balance != null;
+const usedUp = v => capped(v) && (v.max_budget < 0 || v.runs_out_in_s === 0 || (v.remaining != null && v.remaining <= 0));
 
 // When the key budget runs out at the current burn rate.
 function runoutTile(v) {
   const tile = h('section', { class: 'card tile' }, h('div', { class: 'tile-label', text: 'Runs out in' }));
   const value = (cls, ...kids) => h('div', { class: `tile-value ${cls}` }, ...kids);
   const sub = (...kids) => h('p', { class: 'tile-sub' }, ...kids);
-  if (v.max_budget == null) return add(tile, [value('small dim', 'no cap'), sub('This key has no budget cap')]);
-  if (usedUp(v)) return add(tile, [value('t-crit', icon('octagon-x'), 'used up'), sub('No budget left until it resets')]);
+  if (!capped(v)) return add(tile, [value('small dim', 'no cap'), sub('This key has no budget cap')]);
+  if (usedUp(v)) {
+    return add(tile, [value('t-crit', icon('octagon-x'), 'used up'), sub(v.balance != null ? 'No balance left until you top up' : 'No budget left until it resets')]);
+  }
   if (v.burn_per_hour == null) return add(tile, [value('small dim', 'measuring…'), sub('Needs two polls to measure the burn rate')]);
   if (v.runs_out_in_s == null) return add(tile, [value('small t-good', 'not at this rate'), sub(`No spend in the last ${fmtMin(S.data.config.window)}`)]);
   const eta = v.runs_out_in_s;
@@ -550,7 +557,7 @@ function runoutTile(v) {
   const crit = eta < 3600;
   return add(tile, [
     value(crit ? 't-crit' : 't-warn', icon(crit ? 'octagon-x' : 'triangle-alert'), counter('runout', eta, fmtDur, 'down')),
-    sub(`Around ${fmtClock(S.data.summary_time + eta)}, before the budget resets`),
+    sub(`Around ${fmtClock(S.data.summary_time + eta)}${v.reset_in_s != null ? ', before the budget resets' : ''}`),
   ]);
 }
 
@@ -574,7 +581,7 @@ function kvTable(rows) {
 }
 
 function runoutCell(v) {
-  if (v.max_budget == null) return dim('no cap');
+  if (!capped(v)) return dim('no cap');
   if (usedUp(v)) return withIcon('t-crit', 'octagon-x', 'used up');
   if (v.burn_per_hour == null) return dim('measuring…');
   if (v.runs_out_in_s == null) return h('span', { class: 't-good', text: 'not at this rate' });
