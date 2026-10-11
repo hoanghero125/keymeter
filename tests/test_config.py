@@ -4,7 +4,7 @@ import os
 import pytest
 from conftest import KEY
 
-from keymeter import cli, config
+from keymeter import cli, config, gateways
 from keymeter.cli import main
 
 
@@ -86,7 +86,8 @@ def test_odd_entries_in_the_file_are_left_out(clean_env):
 
 
 def test_public_masks_the_key():
-    assert config.public(saved("a")) == {"name": "a", "gateway": "deepseek", "key": "sk-tes…1234", "url": None}
+    assert config.public(saved("a")) == {"name": "a", "gateway": "deepseek", "label": "DeepSeek", "key": "sk-tes…1234",
+                                         "url": None}
 
 
 # ---------------------------------------------------------------- keymeter add, keys, use, remove
@@ -189,10 +190,20 @@ def test_the_key_from_the_environment_wins_over_the_saved_one(clean_env, fake_ga
     assert gw.requests[0][2] == f"Bearer {KEY}"
 
 
-def test_url_option_applies_to_a_saved_key(clean_env, fake_gateway, capsys):
-    gw = fake_gateway({"/user/balance": (200, balance())})
+@pytest.mark.parametrize("argv", [["json", "--url", "http://127.0.0.1:9"], ["json", "ds", "--gateway", "litellm"],
+                                  ["tui", "--once", "--url", "http://127.0.0.1:9"]])
+def test_gateway_options_are_refused_for_a_saved_key(clean_env, argv):
+    # they would silently do nothing in the web page or the tui menu, so a saved key keeps its own everywhere
     config.add(saved("ds", url="http://127.0.0.1:9"))
-    assert main(["json", "--url", gw.url]) == 0
+    with pytest.raises(SystemExit, match="a saved key keeps its own"):
+        main(argv)
+
+
+@pytest.mark.parametrize("argv", [["web", "--url", "http://127.0.0.1:9"], ["tui", "--gateway", "litellm"]])
+def test_gateway_options_are_refused_for_web_and_the_tui_menu_without_an_environment_key(clean_env, monkeypatch, argv):
+    monkeypatch.setattr(cli, "interactive", lambda: True)
+    with pytest.raises(SystemExit, match="a saved key keeps its own"):
+        main(argv)
 
 
 def test_dotenv_without_a_key_cannot_redirect_the_saved_key(clean_env, fake_gateway, capsys):
@@ -251,3 +262,135 @@ def test_dotenv_with_a_key_cannot_route_a_saved_key_through_its_proxy(clean_env,
     assert main(["json", "ds"]) == 0
     assert "HTTP_PROXY" not in os.environ
     assert gw.requests[0][2] == f"Bearer {KEY}"
+
+
+# ---------------------------------------------------------------- what the review turned up
+
+@pytest.mark.parametrize("url", ["http://[", "http://[::1"])
+def test_a_url_keymeter_cant_read_is_an_error_not_a_crash(clean_env, monkeypatch, url):
+    with pytest.raises(config.Error, match="can't read the gateway URL"):
+        config.entry("auto", KEY, url)
+    monkeypatch.setenv("KEYMETER_KEY", KEY)
+    monkeypatch.setenv("KEYMETER_URL", url)
+    with pytest.raises(SystemExit, match="can't read the gateway URL"):
+        main(["json"])
+
+
+def test_a_damaged_keys_file_does_not_stop_the_key_from_the_environment(clean_env, fake_gateway, monkeypatch, capsys):
+    gw = fake_gateway({"/key/info": (200, {"info": {"spend": 1.0}})})
+    config.path().parent.mkdir(parents=True)
+    config.path().write_text("{bad", encoding="utf-8")
+    monkeypatch.setenv("KEYMETER_KEY", KEY)
+    assert main(["json", "--url", gw.url]) == 0
+    with pytest.raises(SystemExit, match="can't read the saved keys"):
+        main(["keys"])
+
+
+def test_writers_in_parallel_threads_lose_nothing(clean_env):
+    import threading
+    threads = [threading.Thread(target=config.add, args=(saved(f"k{i}"),)) for i in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(k["name"] for k in config.load()["keys"]) == sorted(f"k{i}" for i in range(12))
+    assert not list(config.path().parent.glob("*.tmp"))
+
+
+def test_writers_in_parallel_processes_lose_nothing(clean_env):
+    import subprocess
+    import sys
+    code = ("import sys\nfrom keymeter import config\n"
+            "for i in range(8):\n    config.add({'name': f'{sys.argv[1]}-{i}', 'gateway': 'deepseek', 'key': 'sk-x', 'url': None})\n")
+    procs = [subprocess.Popen([sys.executable, "-c", code, f"p{n}"], env=os.environ.copy()) for n in range(3)]
+    assert [p.wait(timeout=60) for p in procs] == [0, 0, 0]
+    assert len(config.load()["keys"]) == 24
+
+
+def test_entries_keymeter_cant_use_are_kept_in_the_file(clean_env):
+    future = {"name": "next", "gateway": "a-gateway-from-a-newer-keymeter", "key": "sk-x", "url": None, "extra": [1]}
+    config.path().parent.mkdir(parents=True)
+    config.path().write_text(json.dumps({"active": "a", "keys": [saved("a"), future], "version": 9}), encoding="utf-8")
+    assert [k["name"] for k in config.load()["keys"]] == ["a"]
+    config.add(saved("b"))
+    config.select("a")
+    data = json.loads(config.path().read_text(encoding="utf-8"))
+    assert future in data["keys"] and data["version"] == 9
+    config.remove("next")  # still forgettable
+    assert future not in json.loads(config.path().read_text(encoding="utf-8"))["keys"]
+
+
+@pytest.mark.parametrize("entry", [{"name": "a", "gateway": "deepseek", "key": "k", "url": 5},
+                                   {"name": "a", "gateway": ["deepseek"], "key": "k"},
+                                   {"name": ["a"], "gateway": "deepseek", "key": "k"}, "a", None])
+def test_odd_entries_are_left_out_without_a_crash(clean_env, capsys, entry):
+    config.path().parent.mkdir(parents=True)
+    config.path().write_text(json.dumps({"active": ["a"], "keys": [entry]}), encoding="utf-8")
+    assert config.load() == {"active": None, "keys": []}
+    assert main(["keys"]) == 0
+
+
+@pytest.mark.parametrize("data", [{"keys": 5}, [1, 2], "x"])
+def test_a_keys_file_of_another_shape_is_an_error_and_left_alone(clean_env, data):
+    config.path().parent.mkdir(parents=True)
+    config.path().write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(config.Error, match="isn't what keymeter writes"):
+        config.add(saved("a"))
+    assert json.loads(config.path().read_text(encoding="utf-8")) == data
+
+
+def test_a_file_that_cant_be_written_is_an_error(clean_env, monkeypatch, capsys):
+    config.add(saved("a"))
+
+    def refuse(src, dst):
+        raise PermissionError(13, "Access is denied")
+    monkeypatch.setattr(config.os, "replace", refuse)
+    monkeypatch.setattr(config.time, "sleep", lambda s: None)
+    with pytest.raises(SystemExit, match="can't save the keys"):
+        main(["remove", "a"])
+    assert [k["name"] for k in config.load()["keys"]] == ["a"]
+    assert not list(config.path().parent.glob("*.tmp"))
+
+
+def test_the_environment_keys_name_is_taken(clean_env):
+    assert "KEYMETER_KEY is what the key from the environment goes by" in config.name_error(config.load(), "KEYMETER_KEY")
+
+
+def test_name_leaves_the_environment_alone(clean_env, fake_gateway, monkeypatch, capsys):
+    gw = fake_gateway({"/user/balance": (200, balance())})
+    config.add(saved("ds", url=gw.url))
+    monkeypatch.setenv("KEYMETER_KEY", KEY)
+    monkeypatch.setenv("KEYMETER_GATEWAY", "bogus")
+    monkeypatch.setenv("KEYMETER_URL", "llm.local")
+    assert main(["json", "ds"]) == 0
+
+
+def test_a_dotenv_that_isnt_utf8_belongs_to_another_program(clean_env, fake_gateway, capsys):
+    gw = fake_gateway({"/user/balance": (200, balance())})
+    config.add(saved("ds", url=gw.url))
+    (clean_env / ".env").write_bytes(b"NAME=\xff\xfe\xfa\n")
+    assert main(["json"]) == 0
+
+
+def test_tui_menu_logs_only_the_first_key_watched(clean_env, monkeypatch, tmp_path, capsys):
+    config.add(saved("a", url="http://127.0.0.1:9"))
+    config.add(saved("b", url="http://127.0.0.1:9"))
+    monkeypatch.setattr(cli, "interactive", lambda: True)
+    logs = []
+    monkeypatch.setattr("keymeter.tui.run", lambda mon, args: logs.append(args.log))
+    answers(monkeypatch, KEY, "1", "2", "1", "q")
+    assert main(["tui", "--log", str(tmp_path / "a.csv")]) == 0
+    assert logs == [str(tmp_path / "a.csv"), None, str(tmp_path / "a.csv")]
+    assert "Not logging b: --log covers a, the first key watched." in capsys.readouterr().out
+
+
+def test_a_new_gateway_needs_only_its_adapter(clean_env, monkeypatch, capsys):
+    class Future:
+        name, label, default_url, features = "future", "Future AI", "https://future.example", frozenset()
+
+        def __init__(self, url, key):
+            self.url, self.key = url, key
+    monkeypatch.setitem(gateways.GATEWAYS, "future", Future)
+    config.add(saved("f", "future"))
+    assert main(["keys"]) == 0
+    assert "Future AI" in capsys.readouterr().out

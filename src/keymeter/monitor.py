@@ -67,8 +67,10 @@ def budget_view(d, rate, now, first_spend):
     elif budget is not None:
         v["runs_out_in_s"] = 0.0  # a negative budget: the gateway refuses spend over it, so it is used up from the start
     elif balance is not None:  # a prepaid balance (DeepSeek): what is left, with no budget, % used or reset
-        v["remaining"] = max(balance, 0.0)
-        if balance <= 0:
+        # the gateway may refuse a balance too small to pay for a request; then none of it can be spent
+        spendable = balance > 0 and d.get("available") is not False
+        v["remaining"] = balance if spendable else 0.0
+        if not spendable:
             v["runs_out_in_s"] = 0.0
         elif rate:
             v["runs_out_in_s"] = max(balance / rate * 3600, 1.0)

@@ -13,6 +13,7 @@ Endpoints:
   POST /api/keys/remove     {"name"}: forget a saved key
 The /api/keys endpoints take JSON only (a form on another site can't send it) and answer only on loopback.
 """
+import copy
 import json
 import math
 import socket
@@ -25,7 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from keymeter import config
+from keymeter import config, gateways
 from keymeter.monitor import Monitor
 from keymeter.util import mask, num, tidy
 
@@ -131,27 +132,35 @@ def no_key_state(args):
 
 class Dashboard:
     """The keys the page picks from (the saved ones, plus the key from the environment, which is never saved) and
-    the Poller of the one it watches, or None before there is a key."""
+    the Poller of the one it watches, or None before there is a key. It follows changes other keymeter processes
+    make to the saved keys (`keymeter add`, `use`, `remove`), and --log covers the first key it watches."""
 
     def __init__(self, args, extra=None):
         self.args, self.extra = args, extra
-        self.lock = threading.Lock()
-        self.poller = None
-        self.watched = None    # the watched key's entry
-        self.manage = True     # whether the page may change the keys; make_server() turns it off beyond loopback
+        self.lock = threading.Lock()   # the poller and the watched key, swapped together
+        self.sync = threading.Lock()   # the saved keys: one request thread at a time reads or changes them
+        self.poller = self.watched = self.log_key = None
+        self.store = self.seen = self.keys_error = None  # the saved keys as last read, and keys.json's stat then
+        self.manage = True             # whether the page may change the keys; make_server() turns it off beyond loopback
 
     def start(self, name=None):
         """Watch the saved key `name`, else the key from the environment, else the saved key watched last."""
-        store = config.load()
-        e = config.find(store, name) if name else self.extra or config.find(store, store["active"])
-        if name and e is None:
-            raise config.Error(f"no saved key named {name!r}; `keymeter keys` lists them")
-        e = e or (store["keys"][0] if store["keys"] else None)
-        if e:
-            self._watch(e)
+        with self.sync:
+            self._read()
+            e = config.choose(name, self.extra)
+            if e:
+                self._watch(e)
 
     def _watch(self, e):
-        poller = Poller(Monitor(config.adapter(e, team=False), self.args))  # the page covers the key only
+        self.log_key = self.log_key or e["name"]
+        args = self.args
+        if e["name"] != self.log_key:  # one CSV holds one key's spend
+            args = copy.copy(self.args)
+            args.log = None
+        mon = Monitor(config.adapter(e, team=False), args)  # the page covers the key only
+        if self.args.log and args.log is None:
+            mon.events.append((time.time(), "info", f"not logging this key: --log covers {self.log_key}, the first key watched"))
+        poller = Poller(mon)
         with self.lock:
             old, self.poller, self.watched = self.poller, poller, e
         poller.start()
@@ -164,53 +173,92 @@ class Dashboard:
         if old:
             old.stop()
 
+    def _read(self, force=False):
+        """Read the saved keys if keys.json changed since the last read -> whether it was read."""
+        try:
+            st = config.path().stat()
+            seen = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            seen = None
+        if self.store is not None and seen == self.seen and not force:
+            return False
+        self.seen = seen
+        try:
+            self.store, self.keys_error = config.load(), None
+        except config.Error as e:
+            self.store, self.keys_error = {"active": None, "keys": []}, str(e)
+        return True
+
+    def _follow(self, active_before):
+        """After another keymeter process changed the saved keys: watch the key it made the one to watch, the saved key
+        again if its settings changed, another one if it was forgotten, or the first one there is if none was watched."""
+        store, w = self.store, self.watched
+        first = config.find(store, store["active"]) or (store["keys"][0] if store["keys"] else None)
+        if store["active"] is not None and store["active"] != active_before and (w is None or store["active"] != w["name"]):
+            self._watch(first)
+        elif w is not None and w is not self.extra and config.find(store, w["name"]) != w:
+            e = config.find(store, w["name"]) or self.extra or first
+            if e:
+                self._watch(e)
+            else:
+                self._forget()
+        elif w is None and first:
+            self._watch(first)
+
     def select(self, name):
-        if self.extra and name == self.extra["name"]:
-            return self._watch(self.extra)
-        e = config.find(config.load(), name)
-        if e is None:
-            raise config.Error(f"no saved key named {name!r}")
-        config.select(name)
-        self._watch(e)
+        with self.sync:
+            if self.extra and name == self.extra["name"]:
+                return self._watch(self.extra)
+            config.select(name)
+            self._read(force=True)
+            self._watch(config.find(self.store, name))
 
     def add(self, gateway, key, url, name, force):
         """Check the key, save it and watch it -> "" or, when the check fails and `force` is off, what the gateway
         answered (nothing saved)."""
         e = config.new_entry(config.load(), gateway, key, url, name)
-        problem = "" if force else config.check(e)
-        if not problem:
-            config.add(e)
+        problem = "" if force else config.check(e)  # outside the lock: it waits for the gateway
+        if problem:
+            return problem
+        with self.sync:
+            config.add(e)  # checks the name again, against keys.json as it is now
+            self._read(force=True)
             self._watch(e)
-        return problem
+        return ""
 
     def remove(self, name):
-        config.remove(name)
-        if self.watched and name == self.watched["name"]:
-            store = config.load()
-            e = self.extra or config.find(store, store["active"])
-            if e:
-                self._watch(e)
-            else:
-                self._forget()
+        with self.sync:
+            config.remove(name)
+            self._read(force=True)
+            w = self.watched
+            if w is not None and w is not self.extra and w["name"] == name:
+                e = self.extra or config.choose()
+                if e:
+                    self._watch(e)
+                else:
+                    self._forget()
 
     def poll_now(self):
         poller = self.poller
         return poller.poll_now() if poller else False
 
     def state(self, since):
+        with self.sync:
+            known = self.store is not None
+            before = self.store["active"] if known else None
+            if self._read() and known:
+                self._follow(before)
+            store, keys_error = self.store, self.keys_error
         with self.lock:
             poller, watched = self.poller, self.watched
         out = poller.state(since) if poller else no_key_state(self.args)
-        out["keys_error"] = None
         if self.manage:
-            try:
-                saved = config.load()["keys"]
-            except config.Error as e:
-                saved, out["keys_error"] = [], str(e)
-            rows = ([(self.extra, False)] if self.extra else []) + [(e, True) for e in saved]
+            rows = ([(self.extra, False)] if self.extra else []) + [(e, True) for e in store["keys"]]
         else:  # beyond loopback, with no login: nothing of the other keys, nor of where they are kept
-            rows = [(watched, watched is not self.extra)] if watched else []
+            rows, keys_error = ([(watched, watched is not self.extra)] if watched else []), None
         out["keys"] = [{**config.public(e), "saved": is_saved} for e, is_saved in rows]
+        out["keys_error"] = keys_error
+        out["gateways"] = [{"name": name, "label": cls.label} for name, cls in gateways.GATEWAYS.items()]
         out["watched"] = watched["name"] if watched else None
         out["manage"] = self.manage
         return out

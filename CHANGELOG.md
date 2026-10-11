@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-10-12)
 
 - Saved keys. `keymeter add` asks for the gateway, the key (typing hidden), the URL for LiteLLM and a
   name, checks the key with one poll and saves it in the user's config folder, so `web`, `tui` and
@@ -11,6 +11,12 @@
   dashboard to another one and forgets one. `keymeter web` starts without a key and shows the form. The
   page sends a key to keymeter and never gets it back. Keys can be changed this way only while keymeter
   listens on loopback, and only with JSON requests from its own pages.
+- Saved keys live in `keys.json` in the user's config folder, readable by the user only. keymeter
+  processes change it under a lock, a running `keymeter web` follows `keymeter add`, `use` and `remove`,
+  entries a newer keymeter saved are kept, and a damaged file doesn't stop `KEYMETER_KEY`.
+  `--gateway` and `--url` go with `KEYMETER_KEY` or a key being added; keymeter refuses them for a saved
+  key, which keeps its own. `--log` covers the first key watched, so switching keys doesn't mix their
+  spend in one CSV.
 - `keymeter tui` without NAME asks which saved key to watch, or adds one; Ctrl+C goes back to that
   question. `json` and `tui --once` run in a terminal without any key ask for one first; elsewhere they
   say how to add one.
@@ -22,9 +28,11 @@
 - DeepSeek support (`--gateway deepseek`, or a URL on `deepseek.com`): keymeter reads the account's
   prepaid USD balance from `GET /user/balance` and shows it with the burn rate and when the balance runs
   out. The spend is what the balance went down by since keymeter started. New status `NO BALANCE` when
-  DeepSeek says the balance can't pay for requests or it is zero; `json` exits with 1 then. The `json`
-  summary's `key_info` and `team_info` gain a `balance` field, null on LiteLLM and OpenRouter.
+  DeepSeek says the balance can't pay for requests or it is zero; `json` exits with 1 then, and the
+  dashboards show the balance as used up. The `json` summary's `key_info` and `team_info` gain a
+  `balance` field, null on LiteLLM and OpenRouter.
 - Web: the run-out tile no longer says "before the budget resets" for a budget that never resets.
+- A gateway URL keymeter can't read, such as `http://[`, is an error message instead of a traceback.
 
 ## 0.1.1 (2026-10-08)
 

@@ -374,7 +374,8 @@ def test_budget_view_has_no_balance_for_a_budget():
 @pytest.mark.parametrize("key", [{"balance": 0.0, "available": False}, {"balance": 2.0, "available": False},
                                  {"balance": 0.0, "available": True}, {"balance": -0.05}])
 def test_used_up_balance_is_no_balance(args, key):
+    # a balance the gateway won't take (too small to pay for a request) is as used up as none at all
     s = run(args, ok(T0, spend=0.0, **key)).summary()
     assert (s["status"], s["message"]) == ("NO BALANCE", "gateway reports no balance left on the account")
-    assert s["key_info"]["remaining"] == max(key["balance"], 0.0)
-    assert s["key_info"]["runs_out_in_s"] == (0.0 if key["balance"] <= 0 else None)
+    assert (s["key_info"]["remaining"], s["key_info"]["runs_out_in_s"]) == (0.0, 0.0)
+    assert s["key_info"]["balance"] == key["balance"]

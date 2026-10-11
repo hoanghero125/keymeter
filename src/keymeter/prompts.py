@@ -3,14 +3,14 @@
 import getpass
 
 from keymeter import config
-from keymeter.gateways import LiteLLM
+from keymeter.gateways import GATEWAYS, LiteLLM
 
 
 def choose_gateway():
-    names = list(config.LABELS)
+    names = list(GATEWAYS)
     print("Which gateway is the key for?")
     for i, name in enumerate(names, 1):
-        print(f"  {i}  {config.LABELS[name]}")
+        print(f"  {i}  {GATEWAYS[name].label}")
     while True:
         answer = input("Gateway: ").strip().lower()
         for i, name in enumerate(names, 1):
@@ -63,12 +63,11 @@ def add_key(gateway=None, url=None, name=None):
 
 def list_keys(store):
     """One line per saved key, numbered; the one watched last is marked with *."""
-    width = max(len(k["name"]) for k in store["keys"])
-    for i, k in enumerate(store["keys"], 1):
-        p = config.public(k)
-        mark = "*" if k["name"] == store["active"] else " "
-        print(f" {mark}{i:>2}  {p['name']:<{width}}  {config.LABELS[p['gateway']]:<13}  {p['key']}"
-              + (f"  {p['url']}" if p["url"] else ""))
+    rows = [config.public(k) for k in store["keys"]]
+    width, label_width = max(len(p["name"]) for p in rows), max(len(p["label"]) for p in rows)
+    for i, p in enumerate(rows, 1):
+        mark = "*" if p["name"] == store["active"] else " "
+        print(f" {mark}{i:>2}  {p['name']:<{width}}  {p['label']:<{label_width}}  {p['key']}" + (f"  {p['url']}" if p["url"] else ""))
 
 
 def pick_key():

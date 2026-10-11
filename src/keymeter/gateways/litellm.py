@@ -9,6 +9,7 @@ from keymeter.gateways.base import Snapshot, error_snapshot, error_text, http_ge
 
 class LiteLLM:
     name = "litellm"
+    label = "LiteLLM proxy"
     default_url = "http://localhost:4000"
     features = frozenset({"models", "limits", "team"})
 

@@ -14,6 +14,7 @@ from keymeter.util import num
 
 class DeepSeek:
     name = "deepseek"
+    label = "DeepSeek"
     default_url = "https://api.deepseek.com"
     features = frozenset()
 

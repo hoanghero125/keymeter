@@ -66,9 +66,10 @@ is all it takes.
 | `keymeter use NAME` | watch the saved key NAME from now on |
 | `keymeter remove NAME` | forget the saved key NAME (the key itself keeps working) |
 
-`NAME` picks a saved key for that run only. Without it, keymeter watches `KEYMETER_KEY` when it is set
-(see [Configuration](https://github.com/hoanghero125/keymeter#configuration)), else the saved key
-watched last. Run in a terminal with no key at all, `json` and `tui --once` ask for one first.
+`NAME` picks a saved key for that run only; `KEYMETER_KEY` and `./.env` aren't looked at then. Without
+it, keymeter watches `KEYMETER_KEY` when it is set (see
+[Configuration](https://github.com/hoanghero125/keymeter#configuration)), else the saved key watched
+last. Run in a terminal with no key at all, `json` and `tui --once` ask for one first.
 
 Options (`keymeter COMMAND -h` lists them per command):
 
@@ -80,14 +81,15 @@ Options (`keymeter COMMAND -h` lists them per command):
 | `-i`, `--interval` | `15` | seconds between polls (`web`, `tui`) |
 | `--window` | `15` | burn-rate window in minutes (`web`, `tui`) |
 | `--warn` / `--crit` | `0.8` / `0.95` | alert thresholds, as a fraction of a budget (`web`, `tui`) |
-| `--log FILE.csv` | | also append every poll to a CSV file (`web`, `tui`) |
+| `--log FILE.csv` | | also append every poll to a CSV file (`web`, `tui`); it covers the first key watched, so switching keys doesn't mix their spend |
 | `--host` / `--port` | `127.0.0.1` / `8765` | where the dashboard listens (`web`) |
 | `--no-team` | | skip LiteLLM's `/team/info` (`tui`, `json`) |
 | `--no-bell` | | don't beep on alerts (`tui`) |
 | `--name` | the gateway's name | name for the new key (`add`) |
 
-`--gateway` and `--url` set up the key from `KEYMETER_KEY`; for `add` they answer the questions, and
-for `tui` and `json` they replace a saved key's own for that run.
+`--gateway` and `--url` set up the key from `KEYMETER_KEY`, and answer the questions of `add` (or of a
+first run in a terminal). A saved key keeps the settings it was saved with: keymeter refuses the two
+options when it would watch one (save the key again with `keymeter add` to change them).
 
 The gateway is picked like this when it is `auto`: OpenRouter when the URL's host is `openrouter.ai`
 or a subdomain of it, or, if no URL is set, when the key starts with `sk-or-`; DeepSeek when the URL's
@@ -101,6 +103,12 @@ host is `deepseek.com` or a subdomain of it; LiteLLM otherwise.
 folder: `%APPDATA%\keymeter` on Windows, `$XDG_CONFIG_HOME/keymeter` or `~/.config/keymeter`
 elsewhere. The file holds the keys as they are, readable by your user only (as `.env` files do).
 `keymeter keys` shows where it is. Delete it to forget every key.
+
+keymeter processes share the file safely: each change is made under a lock (`keys.lock`, next to it),
+and a running `keymeter web` follows `keymeter add`, `use` and `remove` from a terminal within a few
+seconds. Keys a newer keymeter saved, or entries edited by hand that this version can't use, are left
+out of the list and kept in the file. If the file is damaged, keymeter says so, and `KEYMETER_KEY`
+still works. `KEYMETER_KEY` can't name a saved key: it is what the key from the environment goes by.
 
 The web page sends a key to the keymeter process when you add it and never gets it back: the page,
 the JSON summary and `keymeter keys` only show keys masked. The dashboard lets you add, pick or forget
@@ -186,7 +194,8 @@ To keep it running after you log out, use `tmux`, a systemd service, or
 `keymeter web --host 0.0.0.0` serves the dashboard on every interface instead. There is no login,
 so anyone who can reach the port can see the watched key's spend, budget and model usage (not the key
 itself) and press "Poll now". The Keys dialog then shows only the watched key, and nothing about the
-others; add, pick and forget keys with `keymeter add`, `use` and `remove` on the server. If you do this, allow only your own IP in the firewall.
+others; add, pick and forget keys with `keymeter add`, `use` and `remove` on the server, and the
+dashboard follows. If you do this, allow only your own IP in the firewall.
 
 ## How it works
 
@@ -223,14 +232,15 @@ or newer).
 The web UI is plain HTML, CSS and JavaScript in `src/keymeter/static`, with no build step.
 
 To support another gateway, add an adapter in `src/keymeter/gateways/`. It fetches the key's data
-and translates it into the field names the rest of keymeter uses (LiteLLM's); see `openrouter.py`
-for a small example. Then register it in `gateways/__init__.py`: add it to `GATEWAYS`, from which
-`create()` builds the adapter, and to `detect()` if `auto` should pick it.
+and translates it into the field names the rest of keymeter uses (LiteLLM's), and has a `name` and a
+`label` (what `keymeter add` and the Keys dialog call it); see `deepseek.py` or `openrouter.py` for a
+small example. Then register it in `gateways/__init__.py`: add it to `GATEWAYS`, from which `create()`,
+`keymeter add` and the Keys dialog take it, and to `detect()` if `auto` should pick it.
 
 ### Releasing
 
 1. Set `__version__` in `src/keymeter/__init__.py` and add the release to `CHANGELOG.md`.
-2. Commit and tag, then push the commit and the tag together: `git tag v0.1.1 && git push origin main v0.1.1`.
+2. Commit and tag, then push the commit and the tag together: `git tag v0.2.0 && git push origin main v0.2.0`.
 
 The `Release` workflow tests and builds the package, then publishes it to PyPI with trusted
 publishing, so no API token is involved. The trusted publisher (on PyPI, under the project's

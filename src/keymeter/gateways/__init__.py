@@ -3,8 +3,9 @@
 An adapter polls one gateway with the key and returns a Snapshot whose `key` dict uses LiteLLM's
 /key/info field names, so the monitor and both dashboards treat every gateway the same way; a gateway with
 a prepaid balance instead of a budget (DeepSeek) adds `balance` and `available`. Each adapter has `name`,
-`default_url`, `url`, `key`, `fetch() -> Snapshot`, and `features`: the optional parts of the dashboard it can
-fill ("models" = spend per model, "limits" = rate limits and allowed models, "team" = team budget and keys).
+`label` (what the Keys dialog and `keymeter add` call it), `default_url`, `url`, `key`, `fetch() -> Snapshot`, and
+`features`: the optional parts of the dashboard it can fill ("models" = spend per model, "limits" = rate limits
+and allowed models, "team" = team budget and keys).
 """
 from urllib.parse import urlparse
 
@@ -33,6 +34,10 @@ def detect(url, key):
 
 def create(name, url, key, team=True):
     """Adapter for gateway `name` ("auto" or a key of GATEWAYS); `url` falls back to its default."""
+    try:
+        urlparse(url or "").hostname  # noqa: B018 - raises for a URL it can't read, such as "http://["
+    except ValueError as e:
+        raise ValueError(f"can't read the gateway URL {url!r}: {e}") from None
     if name == "auto":
         name = detect(url, key)
     if name not in GATEWAYS:

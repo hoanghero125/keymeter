@@ -15,8 +15,6 @@ const STATUS = {
 };
 const EVENT_STYLE = { good: ['good', 'circle-check'], info: ['neutral', 'info'], warn: ['warning', 'triangle-alert'], crit: ['critical', 'octagon-x'] };
 const FAVICON_COLOR = { good: '#0ca30c', warning: '#fab219', critical: '#d03b3b', neutral: '#2a78d6' };
-const GATEWAY_NAME = { litellm: 'LiteLLM', openrouter: 'OpenRouter', deepseek: 'DeepSeek' };
-const GATEWAY_LABEL = { litellm: 'LiteLLM proxy', openrouter: 'OpenRouter', deepseek: 'DeepSeek' };  // in the Keys dialog
 
 const S = {
   boot: null, version: -1, data: null, history: [], offset: 0,
@@ -535,12 +533,16 @@ function setMsg(el, text, tone = '') {
   el.className = `form-msg${tone ? ` t-${tone}` : ''}`;
 }
 
+// What the keymeter server calls a gateway (/api/state lists them all).
+const gatewayLabel = name => S.data?.gateways?.find(g => g.name === name)?.label ?? name;
+
 function hostOf(url) {
   try { return new URL(url).host; } catch { return url; }
 }
 
 function renderKeys(d) {
   $('keys-label').textContent = d.watched ?? 'Add a key';
+  S.form.fillGateways(d.gateways);
   const sig = JSON.stringify([d.keys, d.watched, d.manage, d.keys_error]);
   if (sig === S.keysSig) return;  // unchanged: keep the focus where it is
   S.keysSig = sig;
@@ -554,7 +556,7 @@ function renderKeys(d) {
 }
 
 function keyRow(k, watched, manage) {
-  const meta = [GATEWAY_LABEL[k.gateway] || k.gateway, k.key, k.url && hostOf(k.url), !k.saved && 'from KEYMETER_KEY, not saved'];
+  const meta = [k.label, k.key, k.url && hostOf(k.url), !k.saved && 'from KEYMETER_KEY, not saved'];
   const pick = h('button', { class: 'key-pick', type: 'button', 'aria-pressed': String(watched), 'aria-disabled': String(!manage) },
     h('span', { class: 'key-name' }, h('span', { text: k.name }), watched && h('span', { class: 'key-tag' }, icon('circle-check'), 'watching')),
     h('span', { class: 'key-meta', text: meta.filter(Boolean).join(' · ') }));
@@ -589,7 +591,7 @@ async function forgetKey(name) {
 // The form that adds a key: in the Keys dialog, or in the empty card while there is no key. Built once, so what is
 // typed survives the refreshes.
 function keyForm() {
-  const gateway = h('select', { name: 'gateway' }, Object.entries(GATEWAY_LABEL).map(([v, t]) => h('option', { value: v, text: t })));
+  const gateway = h('select', { name: 'gateway' });  // the options come with the first /api/state
   const key = h('input', { name: 'key', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: 'sk-…' });
   const url = h('input', { name: 'url', type: 'text', inputmode: 'url', autocomplete: 'off', spellcheck: 'false', placeholder: 'http://localhost:4000' });
   const name = h('input', { name: 'name', type: 'text', autocomplete: 'off', spellcheck: 'false', maxlength: 40 });
@@ -634,12 +636,18 @@ function keyForm() {
       submit.setAttribute('aria-disabled', 'false');
     }
   });
+  form.fillGateways = list => {
+    if (gateway.options.length || !list?.length) return;
+    gateway.replaceChildren(...list.map(g => h('option', { value: g.name, text: g.label })));
+    sync();
+  };
   sync();
   return form;
 }
 
 // No key to watch yet: the empty card says how to add one, and holds the form while this page may change the keys.
 function renderSetup(d) {
+  if ($('keys-dialog').open) $('keys-dialog').close();  // the last key was forgotten there: the form moves to the page
   const empty = $('empty');
   if (empty.dataset.mode === 'setup' && (!d.manage || empty.contains(S.form))) return;
   empty.dataset.mode = 'setup';
@@ -649,7 +657,7 @@ function renderSetup(d) {
       h('h2', { text: 'Add a key to watch' }),
       h('p', { text: d.manage
         ? 'Pick the gateway and paste the key. keymeter checks it with one read-only request (no tokens spent) and saves it in your user folder; this page only ever sees it masked.'
-        : 'Add one with `keymeter add` in a terminal on this server, then reload this page.' }),
+        : 'Add one with `keymeter add` in a terminal on this server; this page picks it up by itself.' }),
       d.manage && S.form));
 }
 
@@ -679,7 +687,7 @@ function budgetTile(v) {
   const label = text => h('div', { class: 'tile-label', text });
   const tile = h('section', { class: 'card tile tile-hero' });
   if (v.balance != null) {  // a prepaid balance (DeepSeek): what is left, with no budget, % used or reset
-    return add(tile, [label('Balance'), h('div', { class: `tile-value${v.balance <= 0 ? ' t-crit' : ''}` }, counter('left', v.balance, usd)),
+    return add(tile, [label('Balance'), h('div', { class: `tile-value${usedUp(v) ? ' t-crit' : ''}` }, counter('left', v.balance, usd)),
       h('p', { class: 'tile-sub', text: 'Prepaid, shared by every key on the account' })]);
   }
   if (v.max_budget == null) {
@@ -791,7 +799,7 @@ function renderLimits(s) {
     : withIcon('t-crit', 'octagon-x', 'expired');
   $('limits').closest('.card').classList.toggle('fit', !full);
   $('limits-sub').textContent = full ? 'Rate limits, expiry and model access'
-    : `Key expiry. ${GATEWAY_NAME[s.gateway_type] || s.gateway_type} doesn't report rate limits or model access`;
+    : `Key expiry. ${gatewayLabel(s.gateway_type)} doesn't report rate limits or model access`;
   fill($('limits'),
     h('div', { class: 'table-wrap' }, kvTable(full ? [
       ['RPM limit', fmtLimit(v.rpm_limit)],

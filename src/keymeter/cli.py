@@ -1,15 +1,17 @@
 """Command line: `keymeter web`, `tui` and `json` watch a key; `add`, `keys`, `use` and `remove` manage the saved ones.
 
 The key to watch is, in order:
-  - the saved key NAME names (`keymeter tui work`)
+  - the saved key NAME names (`keymeter tui work`); the key from the environment is not looked at then
   - KEYMETER_KEY from the environment (empty variables count as unset) or a .env file: --env FILE is always read,
-    ./.env only when KEYMETER_KEY is not already set in the environment and the file sets it
+    ./.env only when KEYMETER_KEY is not already set in the environment and the file sets it, and only for these
       KEYMETER_KEY      the API key to watch
       KEYMETER_URL      gateway base URL (default depends on the gateway)
       KEYMETER_GATEWAY  auto, litellm, openrouter or deepseek (default auto)
   - the saved key watched last (`keymeter add`, `keymeter use`, or the web dashboard's Keys dialog)
+--gateway and --url go with KEYMETER_KEY, or answer `keymeter add`'s questions; a saved key keeps its own.
 """
 import argparse
+import copy
 import json
 import os
 import sys
@@ -19,7 +21,6 @@ from keymeter import __version__, config, gateways, prompts
 from keymeter.monitor import Monitor
 from keymeter.util import tidy
 
-ENV_NAME = "KEYMETER_KEY"  # the name the key from the environment goes by among the saved ones
 ENV_VARS = ("KEYMETER_KEY", "KEYMETER_URL", "KEYMETER_GATEWAY")
 NO_KEY = ("No key to watch yet. Add one with `keymeter add`, open `keymeter web` and add it there, "
           "or set KEYMETER_KEY (in the environment or a .env file).")
@@ -31,12 +32,9 @@ def env(name):
 
 
 def env_lines(path):
-    """(name, value) for each NAME=value line of a .env file."""
+    """(name, value) for each NAME=value line of a .env file; OSError or UnicodeDecodeError when it can't be read."""
     raw = path.read_bytes()
-    try:
-        text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        sys.exit(f"can't read {path}: save it as UTF-8")
+    text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
     lines = []
     for line in text.splitlines():
         line = line.strip()
@@ -54,28 +52,40 @@ def load_env(path, required, names=None):
         if required:
             sys.exit(f"--env file not found: {path}")
         return
-    for k, v in env_lines(path):
+    try:
+        lines = env_lines(path)
+    except UnicodeDecodeError:
+        sys.exit(f"can't read {path}: save it as UTF-8")
+    except OSError as e:
+        sys.exit(f"can't read {path}: {e.strerror or e}")
+    for k, v in lines:
         if not env(k) and (names is None or k in names):  # `export KEYMETER_KEY=` must not hide the file's key
             os.environ[k] = v
+
+
+def sets_key(path):
+    """Whether a .env file sets KEYMETER_KEY; one that can't be read belongs to some other program."""
+    try:
+        return path.is_file() and any(k == "KEYMETER_KEY" and v for k, v in env_lines(path))
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 def env_key(args):
     """The key from the environment or a .env file, as an entry that is watched but never saved; None without one."""
     if args.env:
         load_env(Path(args.env), required=True)
-    elif not env("KEYMETER_KEY"):
-        # ./.env is only a fallback for the key itself: a .env in whatever directory you are in (a cloned repo, say)
-        # must not point a key from your environment, or a saved one, at another server. One without a key belongs
-        # to some other program, so it is not read at all, and of one with a key only the KEYMETER_ settings count:
-        # a proxy set there would carry the saved keys too, once one is picked (NAME, or the web page's Keys dialog).
-        local = Path(".env")
-        if local.is_file() and any(k == "KEYMETER_KEY" and v for k, v in env_lines(local)):
-            load_env(local, required=False, names=ENV_VARS)
+    # ./.env is only a fallback for the key itself: a .env in whatever directory you are in (a cloned repo, say) must
+    # not point a key from your environment, or a saved one, at another server. One without a key belongs to some
+    # other program, so it is not read at all, and of one with a key only the KEYMETER_ settings count: a proxy set
+    # there would carry the saved keys too, once one is picked (in the web page's Keys dialog, say).
+    elif not env("KEYMETER_KEY") and sets_key(Path(".env")):
+        load_env(Path(".env"), required=False, names=ENV_VARS)
     key = env("KEYMETER_KEY")
     if not key:
         return None
     return config.entry((args.gateway or env("KEYMETER_GATEWAY") or "auto").lower(), key,
-                        args.url or env("KEYMETER_URL"), ENV_NAME)
+                        args.url or env("KEYMETER_URL"), config.ENV_NAME)
 
 
 def interactive():
@@ -97,7 +107,7 @@ def build_parser():
     conn = argparse.ArgumentParser(add_help=False)
     conn.add_argument("name", nargs="?", metavar="NAME",
                       help="saved key to watch (default: KEYMETER_KEY, else the saved key watched last)")
-    g = conn.add_argument_group("gateway (for KEYMETER_KEY, or instead of a saved key's own)")
+    g = conn.add_argument_group("gateway (for KEYMETER_KEY; a saved key keeps its own)")
     add_target_args(g)
     g.add_argument("--env", metavar="FILE", help="read settings from this file (default: ./.env, read only when KEYMETER_KEY "
                                                  "is not already set in the environment)")
@@ -108,7 +118,7 @@ def build_parser():
     w.add_argument("--window", type=float, default=15, help="burn-rate window in minutes (default 15)")
     w.add_argument("--warn", type=float, default=0.8, help="warn at this fraction of a budget (default 0.8)")
     w.add_argument("--crit", type=float, default=0.95, help="critical at this fraction (default 0.95)")
-    w.add_argument("--log", metavar="CSV", help="also append every poll to this CSV file")
+    w.add_argument("--log", metavar="CSV", help="also append every poll of the first key watched to this CSV file")
 
     p = argparse.ArgumentParser(
         prog="keymeter",
@@ -177,25 +187,24 @@ def cmd_remove(args):
     return 0
 
 
-def chosen(args, extra):
-    """The entry to watch: the saved key NAME names, the key from the environment, or the saved key watched last;
-    --gateway and --url apply on top. None when there is none."""
-    store = config.load()
-    if args.name:
-        e = config.find(store, args.name)
-        if e is None:
-            raise config.Error(f"no saved key named {args.name!r}; `keymeter keys` lists them")
-    else:
-        e = extra or config.find(store, store["active"]) or (store["keys"][0] if store["keys"] else None)
-    if e is not extra and (args.gateway or args.url):
-        e = config.entry(args.gateway or e["gateway"], e["key"], args.url or e.get("url"), e["name"])
-    return e
+def saved_key_options(args):
+    """--gateway and --url go with KEYMETER_KEY or a key being added: refuse them for a saved key, which keeps its own."""
+    if args.gateway or args.url:
+        raise config.Error("--gateway and --url set up KEYMETER_KEY, or a key `keymeter add` saves; a saved key keeps "
+                           "its own (save it again with `keymeter add` to change them)")
+
+
+def without_log(args):
+    a = copy.copy(args)
+    a.log = None
+    return a
 
 
 def tui_menu(args):
     """Pick a key, watch it until Ctrl+C, pick again; q (or Ctrl+C at the question) quits."""
     from keymeter import tui
     args.switch = True
+    log_key = None  # --log covers the first key watched: one CSV holds one key's spend
     while True:
         try:
             e = prompts.pick_key()
@@ -204,25 +213,39 @@ def tui_menu(args):
             return 0
         if e is None:
             return 0
-        tui.run(Monitor(config.adapter(e, team=not args.no_team), args), args)
+        log_key = log_key or e["name"]
+        run_args = args if e["name"] == log_key else without_log(args)
+        if args.log and run_args is not args:
+            print(f"Not logging {e['name']}: --log covers {log_key}, the first key watched.")
+        tui.run(Monitor(config.adapter(e, team=not args.no_team), run_args), run_args)
         print()
 
 
 def watch(args):
     args.interval = max(args.interval, 1)
-    extra = env_key(args)
+    if args.name:  # a saved key: the environment's key and its settings don't come into it
+        if args.env:
+            load_env(Path(args.env), required=True)  # still its other settings, such as a proxy
+        extra = None
+    else:
+        extra = env_key(args)
     if args.command == "web":
+        if not extra:
+            saved_key_options(args)
         from keymeter import web
         return web.serve(args, extra)  # the page adds and picks keys itself
     if args.command == "tui" and not args.once and not args.name and not extra and interactive():
+        saved_key_options(args)
         return tui_menu(args)
-    e = chosen(args, extra)
+    e = config.choose(args.name, extra)
     if e is None:
         if not interactive():
             sys.exit(NO_KEY)
         e = prompts.add_key(args.gateway, args.url)
         if e is None:
             return 1
+    elif e is not extra:
+        saved_key_options(args)
     mon = Monitor(config.adapter(e, team=not args.no_team), args)
 
     if args.command == "json":

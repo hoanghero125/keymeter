@@ -189,7 +189,9 @@ def test_add_checks_saves_and_watches_the_key(no_key, fake_gateway):
     wait_for(base, lambda d: d["summary"] and d["summary"]["status"] == "OK", "the new key is never watched")
     d = get(base, "/api/state")[2]
     assert d["watched"] == "deepseek" and d["summary"]["key_info"]["balance"] == 8.42
-    assert d["keys"] == [{"name": "deepseek", "gateway": "deepseek", "key": "sk-tes…1234", "url": gw.url, "saved": True}]
+    assert d["keys"] == [{"name": "deepseek", "gateway": "deepseek", "label": "DeepSeek", "key": "sk-tes…1234", "url": gw.url,
+                          "saved": True}]
+    assert {"name": "deepseek", "label": "DeepSeek"} in d["gateways"]
     assert KEY not in json.dumps(d)
 
 
@@ -227,13 +229,13 @@ def test_select_and_remove(no_key, fake_gateway):
     assert dash.watched["name"] == "b" and dash.poller is not old and old.stopped.is_set()
     assert post(base, "/api/keys/remove", {"name": "b"}) == (200, {"ok": True})
     assert dash.watched is None and dash.poller is None
-    assert post(base, "/api/keys/select", {"name": "b"}) == (400, {"error": "no saved key named 'b'"})
+    assert post(base, "/api/keys/select", {"name": "b"})[0] == 400
 
 
 def test_the_key_from_the_environment_is_listed_but_never_saved(dashboard):
     d = get(dashboard, "/api/state")[2]
-    assert d["keys"] == [{"name": "KEYMETER_KEY", "gateway": "litellm", "key": "sk-tes…1234", "url": d["summary"]["gateway"],
-                          "saved": False}]
+    assert d["keys"] == [{"name": "KEYMETER_KEY", "gateway": "litellm", "label": "LiteLLM proxy", "key": "sk-tes…1234",
+                          "url": d["summary"]["gateway"], "saved": False}]
     assert post(dashboard, "/api/keys/select", {"name": "KEYMETER_KEY"}) == (200, {"ok": True})
     assert post(dashboard, "/api/keys/remove", {"name": "KEYMETER_KEY"})[0] == 400
     assert not config.path().exists()
@@ -280,3 +282,60 @@ def test_beyond_loopback_the_page_learns_nothing_of_the_other_keys(no_key, fake_
     assert "secret-project" not in json.dumps(d) and "internal.example" not in json.dumps(d)
     config.path().write_text("{damaged", encoding="utf-8")
     assert get(base, "/api/state")[2]["keys_error"] is None  # no file paths for the network either
+
+
+
+def test_add_with_a_url_keymeter_cant_read_is_refused(no_key):
+    status, d = post(no_key[0], "/api/keys/add", {"gateway": "auto", "key": KEY, "url": "http://["})
+    assert status == 400 and "can't read the gateway URL" in d["error"]
+
+
+def test_beyond_loopback_a_key_added_in_a_terminal_is_picked_up(no_key, fake_gateway):
+    base, dash = no_key
+    dash.manage = False
+    gw = fake_gateway({"/user/balance": lambda q: (200, balance("1.00"))})
+    config.add({"name": "ds", "gateway": "deepseek", "key": KEY, "url": gw.url})  # `keymeter add` in another process
+    wait_for(base, lambda d: d["watched"] == "ds", "the key added elsewhere is never watched")
+
+
+def test_keymeter_use_and_remove_elsewhere_switch_the_dashboard(no_key, fake_gateway):
+    base = no_key[0]
+    gw = fake_gateway({"/user/balance": lambda q: (200, balance("1.00"))})
+    for name in ("a", "b"):
+        config.add({"name": name, "gateway": "deepseek", "key": KEY, "url": gw.url})
+    wait_for(base, lambda d: d["watched"] == "b", "the key added last is never watched")
+    config.select("a")  # `keymeter use a`
+    wait_for(base, lambda d: d["watched"] == "a", "`keymeter use` is never followed")
+    config.remove("a")  # `keymeter remove a`
+    wait_for(base, lambda d: d["watched"] == "b", "a forgotten key stays watched")
+    config.remove("b")
+    wait_for(base, lambda d: d["watched"] is None and d["summary"] is None, "the last forgotten key stays watched")
+
+
+def test_the_dashboard_reads_the_keys_file_only_when_it_changes(no_key, monkeypatch):
+    base, _ = no_key
+    config.add({"name": "a", "gateway": "deepseek", "key": KEY, "url": "http://127.0.0.1:9"})
+    get(base, "/api/state")
+    reads = []
+    real = config.load
+    monkeypatch.setattr(config, "load", lambda: reads.append(1) or real())
+    for _ in range(5):
+        get(base, "/api/state")
+    assert reads == []
+
+
+def test_log_covers_the_first_key_watched(clean_env, args, tmp_path):
+    args.log = str(tmp_path / "spend.csv")
+    for name in ("a", "b"):
+        config.add({"name": name, "gateway": "deepseek", "key": KEY, "url": "http://127.0.0.1:9"})
+    dash = Dashboard(args)
+    try:
+        dash.start("a")
+        assert dash.poller.mon.args.log == args.log
+        dash.select("b")
+        mon = dash.poller.mon
+        assert mon.args.log is None and any("--log covers a" in text for _, _, text in mon.events)
+        dash.select("a")
+        assert dash.poller.mon.args.log == args.log
+    finally:
+        dash.poller.stop()

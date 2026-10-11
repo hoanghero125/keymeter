@@ -122,7 +122,7 @@ def render_budget(s, args, limit=None):
         if not v:
             continue
         if v["balance"] is not None:  # a prepaid balance (DeepSeek): no budget, % used or reset
-            g.add_row("Balance", Text(f"{usd(v['balance'])} left", style="red" if v["balance"] <= 0 else "cyan"))
+            g.add_row("Balance", Text(f"{usd(v['balance'])} left", style="red" if v["runs_out_in_s"] == 0 else "cyan"))
             g.add_row("", Text("prepaid, shared by every key on the account", style="dim"))
             continue
         style = pct_style(v["used_pct"], args)

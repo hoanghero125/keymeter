@@ -46,6 +46,7 @@ def translate(d, now):
 
 class OpenRouter:
     name = "openrouter"
+    label = "OpenRouter"
     default_url = "https://openrouter.ai/api"
     features = frozenset()
 
