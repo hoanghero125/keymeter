@@ -30,7 +30,7 @@ def test_load_env_parses_lines_and_keeps_real_environment(clean_env, monkeypatch
 
 
 def test_missing_key_exits_with_help(clean_env):
-    with pytest.raises(SystemExit, match="KEYMETER_KEY is not set"):
+    with pytest.raises(SystemExit, match="No key to watch yet.*or set KEYMETER_KEY"):
         main(["json"])
 
 

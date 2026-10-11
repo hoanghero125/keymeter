@@ -89,8 +89,11 @@ def args():
 
 @pytest.fixture
 def clean_env(monkeypatch, tmp_path):
-    """No KEYMETER_* variables and an empty working directory (so the developer's own .env is not read)."""
+    """No KEYMETER_* variables, an empty working directory and an empty config folder (so the developer's own .env and
+    the key saved by `keymeter setup` are not read)."""
     for name in ("KEYMETER_KEY", "KEYMETER_URL", "KEYMETER_GATEWAY"):
         monkeypatch.delenv(name, raising=False)
+    for name in ("APPDATA", "XDG_CONFIG_HOME"):  # where config.path() looks, on Windows and elsewhere
+        monkeypatch.setenv(name, str(tmp_path / "config"))
     monkeypatch.chdir(tmp_path)
     return tmp_path

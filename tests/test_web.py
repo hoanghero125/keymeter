@@ -8,27 +8,42 @@ import urllib.request
 import pytest
 from conftest import KEY, Scripted, ok
 
-from keymeter.gateways import LiteLLM
+from keymeter import config
 from keymeter.monitor import Monitor
-from keymeter.web import Poller, make_server
+from keymeter.web import Dashboard, Poller, make_server
 
 T0 = 1_800_000_000.0
 
 
-@pytest.fixture
-def dashboard(fake_gateway, args):
-    gw = fake_gateway({"/key/info": (200, {"info": {"spend": 2.5, "max_budget": 10, "model_spend": {"gpt-x": 2.5}}})})
-    server, poller = make_server(Monitor(LiteLLM(gw.url, KEY), args), "127.0.0.1", 0)
-    poller.start()
+def env_key(url):
+    return config.entry("litellm", KEY, url, "KEYMETER_KEY")
+
+
+def start(dash, host="127.0.0.1"):
+    """Serve `dash` on a free port -> (base URL, server)."""
+    server = make_server(dash, host, 0)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
-    base = f"http://127.0.0.1:{server.server_address[1]}"
+    return f"http://127.0.0.1:{server.server_address[1]}", server
+
+
+def wait_for(base, check, what):
     deadline = time.time() + 5
-    while get(base, "/api/state")[2]["version"] < 1:  # wait for the first gateway poll
-        assert time.time() < deadline, "first poll never finished"
+    while not check(get(base, "/api/state")[2]):
+        assert time.time() < deadline, what
         time.sleep(0.02)
+
+
+@pytest.fixture
+def dashboard(clean_env, fake_gateway, args):
+    gw = fake_gateway({"/key/info": (200, {"info": {"spend": 2.5, "max_budget": 10, "model_spend": {"gpt-x": 2.5}}})})
+    dash = Dashboard(args, env_key(gw.url))
+    dash.start()
+    base, server = start(dash)
+    wait_for(base, lambda d: d["version"] >= 1, "first poll never finished")
     yield base
     server.shutdown()
     server.server_close()
+    dash.poller.stop()
 
 
 def get(base, path, method="GET"):
@@ -124,8 +139,130 @@ def test_malformed_request_target_is_a_bad_request(dashboard, method):
 
 def test_listens_on_ipv6_loopback(args):
     try:
-        server, _ = make_server(Monitor(LiteLLM("http://127.0.0.1:9", KEY), args), "::1", 0)
+        server = make_server(Dashboard(args), "::1", 0)
     except OSError:
         pytest.skip("no IPv6 loopback here")
     assert server.server_address[0] == "::1"
     server.server_close()
+
+
+# ---------------------------------------------------------------- keys
+
+def post(base, path, body, headers=None):
+    req = urllib.request.Request(base + path, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", **(headers or {})})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def balance(total):
+    return {"is_available": True, "balance_infos": [{"currency": "USD", "total_balance": total}]}
+
+
+@pytest.fixture
+def no_key(clean_env, args):
+    dash = Dashboard(args)
+    dash.start()
+    base, server = start(dash)
+    yield base, dash
+    server.shutdown()
+    server.server_close()
+    if dash.poller:
+        dash.poller.stop()
+
+
+def test_without_a_key_the_page_gets_no_summary(no_key):
+    base, _ = no_key
+    d = get(base, "/api/state")[2]
+    assert (d["summary"], d["keys"], d["watched"], d["manage"]) == (None, [], None, True)
+    assert get(base, "/api/poll", method="POST")[2] == {"queued": False}
+
+
+def test_add_checks_saves_and_watches_the_key(no_key, fake_gateway):
+    base, _ = no_key
+    gw = fake_gateway({"/user/balance": (200, balance("8.42"))})
+    assert post(base, "/api/keys/add", {"gateway": "deepseek", "key": KEY, "url": gw.url}) == (200, {"ok": True, "problem": ""})
+    assert config.load()["keys"] == [{"name": "deepseek", "gateway": "deepseek", "key": KEY, "url": gw.url}]
+    wait_for(base, lambda d: d["summary"] and d["summary"]["status"] == "OK", "the new key is never watched")
+    d = get(base, "/api/state")[2]
+    assert d["watched"] == "deepseek" and d["summary"]["key_info"]["balance"] == 8.42
+    assert d["keys"] == [{"name": "deepseek", "gateway": "deepseek", "key": "sk-tes…1234", "url": gw.url, "saved": True}]
+    assert KEY not in json.dumps(d)
+
+
+def test_add_reports_a_failed_check_and_saves_only_when_forced(no_key, fake_gateway):
+    base, _ = no_key
+    gw = fake_gateway({"/user/balance": (401, {"error": {"message": "Authentication Fails"}})})
+    key = {"gateway": "deepseek", "key": KEY, "url": gw.url, "name": "ds"}
+    assert post(base, "/api/keys/add", key) == (200, {"ok": False, "problem": "AUTH ERROR: Authentication Fails"})
+    assert config.load()["keys"] == []
+    assert post(base, "/api/keys/add", {**key, "force": True})[1]["ok"]
+    assert config.load()["active"] == "ds"
+
+
+@pytest.mark.parametrize(("body", "error"), [
+    ({"gateway": "deepseek", "key": " "}, "the API key is empty"),
+    ({"gateway": "openai", "key": KEY}, "unknown gateway 'openai'"),
+    ({"gateway": "litellm", "key": KEY, "url": "llm.example.com"}, "must start with http:// or https://"),
+    ({"gateway": "deepseek", "key": KEY, "name": "-x"}, "a key name is 1 to 40"),
+    ({"gateway": 3, "key": [KEY]}, "the API key is empty"),
+])
+def test_add_refuses_what_it_can_tell_is_wrong(no_key, body, error):
+    status, d = post(no_key[0], "/api/keys/add", body)
+    assert status == 400 and error in d["error"]
+
+
+def test_select_and_remove(no_key, fake_gateway):
+    base, dash = no_key
+    gw = fake_gateway({"/user/balance": lambda q: (200, balance("1.00"))})
+    config.add({"name": "a", "gateway": "deepseek", "key": KEY, "url": gw.url})
+    config.add({"name": "b", "gateway": "deepseek", "key": KEY, "url": gw.url})
+    assert post(base, "/api/keys/select", {"name": "a"}) == (200, {"ok": True})
+    assert dash.watched == "a" and config.load()["active"] == "a"
+    old = dash.poller
+    assert post(base, "/api/keys/remove", {"name": "a"}) == (200, {"ok": True})
+    assert dash.watched == "b" and dash.poller is not old and old.stopped.is_set()
+    assert post(base, "/api/keys/remove", {"name": "b"}) == (200, {"ok": True})
+    assert dash.watched is None and dash.poller is None
+    assert post(base, "/api/keys/select", {"name": "b"}) == (400, {"error": "no saved key named 'b'"})
+
+
+def test_the_key_from_the_environment_is_listed_but_never_saved(dashboard):
+    d = get(dashboard, "/api/state")[2]
+    assert d["keys"] == [{"name": "KEYMETER_KEY", "gateway": "litellm", "key": "sk-tes…1234", "url": d["summary"]["gateway"],
+                          "saved": False}]
+    assert post(dashboard, "/api/keys/select", {"name": "KEYMETER_KEY"}) == (200, {"ok": True})
+    assert post(dashboard, "/api/keys/remove", {"name": "KEYMETER_KEY"})[0] == 400
+    assert not config.path().exists()
+
+
+@pytest.mark.parametrize(("headers", "status"), [
+    ({"Content-Type": "text/plain"}, 415),                  # what a form on another site can send
+    ({"Content-Type": "application/x-www-form-urlencoded"}, 415),
+    ({"Origin": "https://evil.example"}, 403),
+])
+def test_key_changes_take_json_from_this_machine_only(no_key, headers, status):
+    assert post(no_key[0], "/api/keys/add", {"gateway": "deepseek", "key": KEY}, headers)[0] == status
+    assert config.load()["keys"] == []
+
+
+def test_key_changes_are_off_beyond_loopback(no_key):
+    base, dash = no_key
+    assert dash.manage is True  # make_server() turns it off for any host but a loopback one
+    dash.manage = False         # as on --host 0.0.0.0, without opening a port to the network in a test
+    assert get(base, "/api/state")[2]["manage"] is False
+    status, err = post(base, "/api/keys/add", {"gateway": "deepseek", "key": KEY})
+    assert status == 403 and "keymeter add" in err["error"]
+
+
+def test_a_big_or_odd_body_is_refused(no_key):
+    base = no_key[0]
+    assert post(base, "/api/keys/add", ["not", "an", "object"])[0] == 400
+    # the size alone gets the answer, before any of the body is read (sending one would race the server closing)
+    with socket.create_connection(("127.0.0.1", int(base.rsplit(":", 1)[1])), timeout=5) as s:
+        s.sendall(b"POST /api/keys/add HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+                  b"Content-Length: 66560\r\n\r\n")
+        assert s.makefile("rb").readline().split()[1:2] == [b"413"]

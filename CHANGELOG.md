@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Saved keys. `keymeter add` asks for the gateway, the key (typing hidden), the URL for LiteLLM and a
+  name, checks the key with one poll and saves it in the user's config folder, so `web`, `tui` and
+  `json` work from any directory with no environment variable or `.env`. `keymeter keys` lists the saved
+  keys masked, `keymeter use NAME` picks the one to watch and `keymeter remove NAME` forgets one; `web`,
+  `tui` and `json` take a `NAME` to watch another for that run.
+- Web: a Keys button adds a key (gateway, key, URL, name, checked before it is saved), switches the
+  dashboard to another one and forgets one. `keymeter web` starts without a key and shows the form. The
+  page sends a key to keymeter and never gets it back. Keys can be changed this way only while keymeter
+  listens on loopback, and only with JSON requests from its own pages.
+- `keymeter tui` without NAME asks which saved key to watch, or adds one; Ctrl+C goes back to that
+  question. `json` and `tui --once` run in a terminal without any key ask for one first; elsewhere they
+  say how to add one.
+- `./.env` is read only when it sets `KEYMETER_KEY`, so a `.env` of another program in the working
+  directory no longer goes into keymeter's environment.
 - DeepSeek support (`--gateway deepseek`, or a URL on `deepseek.com`): keymeter reads the account's
   prepaid USD balance from `GET /user/balance` and shows it with the burn rate and when the balance runs
   out. The spend is what the balance went down by since keymeter started. New status `NO BALANCE` when

@@ -388,7 +388,8 @@ def render(mon, console, once=False, fitted=None):
         parts.append(side_by_side(width, render_limits(s), render_activity(s)))
     if once:
         return Group(*parts, *render_tables(s, args, width), render_events(mon))
-    foot = f"Ctrl+C to quit · poll every {args.interval:g}s · alerts at {args.warn:.0%} / {args.crit:.0%}"
+    stop = "Ctrl+C to pick another key" if getattr(args, "switch", False) else "Ctrl+C to quit"  # switch: tui_menu() in cli
+    foot = f"{stop} · poll every {args.interval:g}s · alerts at {args.warn:.0%} / {args.crit:.0%}"
     if args.log:
         foot += f" · logging to {args.log}"
     foot = Text(foot, style="dim")

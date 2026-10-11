@@ -35,47 +35,40 @@ keymeter needs Python 3.10 or newer.
 
 ## Quick start
 
-**LiteLLM proxy**
-
 ```bash
-export KEYMETER_URL=https://llm.example.com    # your proxy
-export KEYMETER_KEY=sk-...
 keymeter web
 ```
 
-**OpenRouter**
+Open <http://localhost:8765>, pick the gateway (LiteLLM proxy, OpenRouter or DeepSeek), paste the key
+and, for LiteLLM, the proxy's URL. keymeter checks the key with one read-only request and starts
+watching it. The **Keys** button at the top adds more keys, switches between them and forgets them.
+
+In the terminal, the same goes like this:
 
 ```bash
-export KEYMETER_KEY=sk-or-v1-...
-keymeter web
+keymeter add      # asks for the gateway, the key (typing is hidden) and the URL, checks the key, saves it
+keymeter tui      # asks which saved key to watch; Ctrl+C goes back to that question
 ```
 
-**DeepSeek**
-
-```bash
-export KEYMETER_URL=https://api.deepseek.com
-export KEYMETER_KEY=sk-...
-keymeter web
-```
-
-Then open <http://localhost:8765>. keymeter picks the gateway by itself: OpenRouter when the URL's
-host is `openrouter.ai` or a subdomain of it, or, if no URL is set, when the key starts with `sk-or-`;
-DeepSeek when the URL's host is `deepseek.com` or a subdomain of it; LiteLLM otherwise.
-So OpenRouter needs no URL, and a bare `https://openrouter.ai` works too. A DeepSeek key looks like a
-LiteLLM one, so DeepSeek needs the URL, or `--gateway deepseek` (which defaults to
-`https://api.deepseek.com`).
-
-On Windows PowerShell, set the variables with `$env:KEYMETER_KEY = "sk-..."`. You can also put
-them in a `.env` file instead (see [Configuration](https://github.com/hoanghero125/keymeter#configuration)).
+Saved keys work from any directory, so from then on `keymeter web`, `keymeter tui` or `keymeter json`
+is all it takes.
 
 ## Commands
 
 | Command | |
 |---|---|
-| `keymeter web` | browser dashboard on <http://localhost:8765> |
-| `keymeter tui` | live dashboard in the terminal; on LiteLLM it also shows the team's budget and keys when the key may read them |
-| `keymeter tui --once` | print one snapshot and exit; exits with code 1 when the status is not OK, like `json` |
-| `keymeter json` | print one snapshot as JSON, for scripts and cron jobs; exits with code 1 when the status is not OK (the key or its team over budget or blocked, the key expired, or the gateway unreachable or answering with an error) |
+| `keymeter web [NAME]` | browser dashboard on <http://localhost:8765>; its Keys button adds, picks and forgets keys |
+| `keymeter tui [NAME]` | live dashboard in the terminal; without NAME it first asks which saved key to watch (or adds one), and Ctrl+C goes back to that question. On LiteLLM it also shows the team's budget and keys when the key may read them |
+| `keymeter tui NAME --once` | print one snapshot and exit; exits with code 1 when the status is not OK, like `json` |
+| `keymeter json [NAME]` | print one snapshot as JSON, for scripts and cron jobs; exits with code 1 when the status is not OK (the key or its team over budget or blocked, the key expired, the balance used up, or the gateway unreachable or answering with an error) |
+| `keymeter add` | save a key: asks for the gateway, the key, the URL (LiteLLM) and a name, and checks the key first |
+| `keymeter keys` | list the saved keys, masked; `*` marks the one `web`, `tui` and `json` watch |
+| `keymeter use NAME` | watch the saved key NAME from now on |
+| `keymeter remove NAME` | forget the saved key NAME (the key itself keeps working) |
+
+`NAME` picks a saved key for that run only. Without it, keymeter watches `KEYMETER_KEY` when it is set
+(see [Configuration](https://github.com/hoanghero125/keymeter#configuration)), else the saved key
+watched last. Run in a terminal with no key at all, `json` and `tui --once` ask for one first.
 
 Options (`keymeter COMMAND -h` lists them per command):
 
@@ -83,7 +76,7 @@ Options (`keymeter COMMAND -h` lists them per command):
 |---|---|---|
 | `--gateway` | `auto` | `litellm`, `openrouter`, `deepseek`, or `auto` to pick from the URL's host, or from the key when no URL is set |
 | `--url` | depends on the gateway | gateway base URL; `http://localhost:4000` for LiteLLM, `https://openrouter.ai/api` for OpenRouter, `https://api.deepseek.com` for DeepSeek. A trailing `/v1` is fine, and so is a bare `https://openrouter.ai`. |
-| `--env FILE` | `.env` | where to read settings from; `./.env` is skipped when `KEYMETER_KEY` is already set in the environment |
+| `--env FILE` | `.env` | where to read settings from; `./.env` is read only when `KEYMETER_KEY` is not already set in the environment and the file sets it |
 | `-i`, `--interval` | `15` | seconds between polls (`web`, `tui`) |
 | `--window` | `15` | burn-rate window in minutes (`web`, `tui`) |
 | `--warn` / `--crit` | `0.8` / `0.95` | alert thresholds, as a fraction of a budget (`web`, `tui`) |
@@ -91,22 +84,48 @@ Options (`keymeter COMMAND -h` lists them per command):
 | `--host` / `--port` | `127.0.0.1` / `8765` | where the dashboard listens (`web`) |
 | `--no-team` | | skip LiteLLM's `/team/info` (`tui`, `json`) |
 | `--no-bell` | | don't beep on alerts (`tui`) |
+| `--name` | the gateway's name | name for the new key (`add`) |
+
+`--gateway` and `--url` set up the key from `KEYMETER_KEY`; for `add` they answer the questions, and
+for `tui` and `json` they replace a saved key's own for that run.
+
+The gateway is picked like this when it is `auto`: OpenRouter when the URL's host is `openrouter.ai`
+or a subdomain of it, or, if no URL is set, when the key starts with `sk-or-`; DeepSeek when the URL's
+host is `deepseek.com` or a subdomain of it; LiteLLM otherwise.
 
 ## Configuration
 
-keymeter reads three settings, from the environment first and then from a `.env` file in the
+### Saved keys
+
+`keymeter add` and the web dashboard's Keys dialog save keys in `keys.json` in your user's config
+folder: `%APPDATA%\keymeter` on Windows, `$XDG_CONFIG_HOME/keymeter` or `~/.config/keymeter`
+elsewhere. The file holds the keys as they are, readable by your user only (as `.env` files do).
+`keymeter keys` shows where it is. Delete it to forget every key.
+
+The web page sends a key to the keymeter process when you add it and never gets it back: the page,
+the JSON summary and `keymeter keys` only show keys masked. The dashboard lets you add, pick or forget
+keys only while it listens on this machine alone (the default `--host 127.0.0.1`), and takes those
+requests only as JSON from its own pages, so another website can't change them.
+
+### Environment variables and `.env`
+
+Instead of a saved key, keymeter can take one from the environment, or from a `.env` file in the
 current directory (or the file given with `--env`). An empty variable counts as unset.
 
 | Variable | |
 |---|---|
-| `KEYMETER_KEY` | the API key to watch (required) |
+| `KEYMETER_KEY` | the API key to watch |
 | `KEYMETER_URL` | gateway base URL |
 | `KEYMETER_GATEWAY` | `auto`, `litellm`, `openrouter` or `deepseek` |
 
-Copy [`.env.example`](https://github.com/hoanghero125/keymeter/blob/main/.env.example) to `.env` to start.
-keymeter reads `./.env` only when `KEYMETER_KEY` is not set in the environment (a file you name with
-`--env` is always read). That way a `.env` in whatever directory you happen to be in, such as a cloned
-repository, can't send your key to another server.
+A key set this way is watched before the saved ones and shows in the web dashboard's Keys dialog as
+`KEYMETER_KEY`, but is never saved. On Windows PowerShell, set the variables with
+`$env:KEYMETER_KEY = "sk-..."`. Copy [`.env.example`](https://github.com/hoanghero125/keymeter/blob/main/.env.example)
+to `.env` to start.
+
+keymeter reads `./.env` only when `KEYMETER_KEY` is not set in the environment and the file sets it
+(a file you name with `--env` is always read). That way a `.env` in whatever directory you happen to be
+in, such as a cloned repository or another program's, can't send your key to another server.
 
 There is no `--key` option, because a key typed on the command line ends up in your shell history.
 
@@ -164,8 +183,9 @@ To keep it running after you log out, use `tmux`, a systemd service, or
 `nohup keymeter web > keymeter.log 2>&1 &`.
 
 `keymeter web --host 0.0.0.0` serves the dashboard on every interface instead. There is no login,
-so anyone who can reach the port can see the key's spend, budget and model usage (not the key
-itself) and press "Poll now". If you do this, allow only your own IP in the firewall.
+so anyone who can reach the port can see the watched key's spend, budget and model usage (not the key
+itself) and press "Poll now". The Keys dialog then only lists the keys; add, pick and forget them with
+`keymeter add`, `use` and `remove` on the server. If you do this, allow only your own IP in the firewall.
 
 ## How it works
 

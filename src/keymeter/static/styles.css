@@ -332,6 +332,57 @@ td .mono { white-space: nowrap; }
 
 .foot { margin-top: 20px; font-size: 13px; color: var(--text-2); text-align: center; }
 
+/* ---------------------------------------------------------------- keys */
+
+.dialog {
+  width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0; overflow: auto;
+  border-radius: var(--radius); border: 1px solid var(--border-strong);
+  background: var(--surface); color: var(--text); box-shadow: var(--tip-shadow);
+}
+.dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+.dialog[open] { animation: fade-in 160ms ease-out; }
+.dialog-body { display: grid; gap: 14px; padding: 20px; }
+.dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.dialog h2 { font-size: 17px; font-weight: 600; }
+.add-section { display: grid; gap: 12px; padding-top: 14px; border-top: 1px solid var(--border); }
+.add-section h3 { font-size: 15px; font-weight: 600; margin: 0; }
+
+.key-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.key-row { display: flex; align-items: center; gap: 8px; }
+.key-pick {
+  flex: 1; min-width: 0; display: grid; gap: 2px; padding: 10px 12px; text-align: left; cursor: pointer;
+  border-radius: 10px; border: 1px solid var(--border); background: var(--surface);
+  transition: background-color 150ms, border-color 150ms;
+}
+.key-pick:hover:not([aria-pressed="true"]):not([aria-disabled="true"]) { background: var(--surface-2); }
+.key-pick[aria-pressed="true"] {
+  cursor: default; border-color: color-mix(in oklab, var(--series-1) 60%, transparent);
+  background: color-mix(in oklab, var(--series-1) 8%, var(--surface));
+}
+.key-pick[aria-disabled="true"] { cursor: default; }
+.key-name { display: flex; align-items: center; gap: 10px; font-weight: 600; overflow-wrap: anywhere; }
+.key-tag { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; color: var(--accent-text); }
+.key-tag .i { width: 14px; height: 14px; }
+.key-meta { font: 12px/1.5 var(--mono); color: var(--text-2); overflow-wrap: anywhere; }
+
+.key-form { display: grid; gap: 12px; }
+.setup { display: grid; gap: 8px; min-width: 0; flex: 1; }
+.setup .key-form { max-width: 460px; margin-top: 8px; }
+.field { display: grid; gap: 4px; font-size: 13px; font-weight: 500; color: var(--text-2); }
+.field .hint { font-weight: 400; color: var(--muted); }
+.field input, .field select {
+  width: 100%; min-height: 40px; padding: 0 12px; border-radius: 10px;
+  border: 1px solid var(--border-strong); background: var(--page); color: var(--text); font: 14px var(--font);
+}
+.field input[name="key"], .field input[name="url"] { font: 13px var(--mono); }
+.field input:focus-visible, .field select:focus-visible { outline-offset: 0; }
+.form-msg { font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
+.form-msg.t-crit { color: var(--critical-text); }
+.form-msg:empty { display: none; }
+.form-actions { display: flex; gap: 8px; }
+.btn.primary { background: var(--text); color: var(--surface); border-color: var(--text); }
+.btn.primary:hover:not([aria-disabled="true"]) { background: var(--text-2); border-color: var(--text-2); }
+
 /* ---------------------------------------------------------------- responsive */
 
 @media (max-width: 1140px) {
@@ -351,7 +402,7 @@ td .mono { white-space: nowrap; }
   .live { flex: 1 1 100%; order: 5; }
 }
 @media (pointer: coarse) {
-  .btn, .icon-btn { min-height: 44px; }
+  .btn, .icon-btn, .field input, .field select { min-height: 44px; }
   .icon-btn { width: 44px; }
   .seg button { min-height: 40px; }
 }

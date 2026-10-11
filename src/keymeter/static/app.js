@@ -16,10 +16,12 @@ const STATUS = {
 const EVENT_STYLE = { good: ['good', 'circle-check'], info: ['neutral', 'info'], warn: ['warning', 'triangle-alert'], crit: ['critical', 'octagon-x'] };
 const FAVICON_COLOR = { good: '#0ca30c', warning: '#fab219', critical: '#d03b3b', neutral: '#2a78d6' };
 const GATEWAY_NAME = { litellm: 'LiteLLM', openrouter: 'OpenRouter', deepseek: 'DeepSeek' };
+const GATEWAY_LABEL = { litellm: 'LiteLLM proxy', openrouter: 'OpenRouter', deepseek: 'DeepSeek' };  // in the Keys dialog
 
 const S = {
   boot: null, version: -1, data: null, history: [], offset: 0,
   serverOk: null, bellSeq: null, pollPending: false, bannerKey: null, favicon: null,
+  loopTimer: 0, refreshing: false, kickAgain: false, keysSig: null, form: null,
   range: load('keymeter-range', '1h'), theme: load('keymeter-theme', 'auto'), alerts: load('keymeter-alerts', 'off') === 'on',
 };
 let charts, audio;
@@ -237,6 +239,7 @@ async function refresh() {
     if (keepFrom > 0) S.history.splice(0, keepFrom);
     S.serverOk = true;
     S.data = d;
+    renderKeys(d);
     if (d.version !== S.version) {
       S.version = d.version;
       S.pollPending = false;
@@ -260,8 +263,20 @@ async function refresh() {
 }
 
 async function loop() {
+  S.refreshing = true;
   await refresh();
-  setTimeout(loop, S.pollPending || S.data?.poller.polling ? 700 : REFRESH_MS);
+  S.refreshing = false;
+  const again = S.kickAgain;
+  S.kickAgain = false;
+  S.loopTimer = setTimeout(loop, again ? 0 : S.pollPending || S.data?.poller?.polling ? 700 : REFRESH_MS);
+}
+
+// Refresh now rather than on the next tick (after the page changed the keys). A refresh under way may predate the
+// change, so another one follows it.
+function kick() {
+  if (S.refreshing) { S.kickAgain = true; return; }
+  clearTimeout(S.loopTimer);
+  loop();
 }
 
 async function pollNow() {
@@ -349,7 +364,7 @@ function applyTheme() {
 // ---------------------------------------------------------------- render: frame
 
 function render() {
-  const d = S.data, s = d.summary, has = !!s.key_info;
+  const d = S.data, s = d.summary, has = !!s?.key_info;
   renderHeader(s);
   // swap the empty state and the dashboard: the old one goes at once, the new one fades in
   for (const [el, show] of [[$('empty'), !has], [$('dash'), has]]) {
@@ -363,14 +378,22 @@ function render() {
     // gateways that report no per-model spend (OpenRouter) get no models card
     $('models-card').hidden = !s.features.includes('models');
     renderModels(s);
+  } else if (!s) {
+    renderSetup(d);
   } else {
     renderEmpty(s, d);
   }
+  if (s && S.form.parentElement !== $('add-slot')) $('add-slot').append(S.form);  // back in the Keys dialog
   renderEvents(d.events);
   renderFoot(d);
 }
 
 function renderHeader(s) {
+  if (!s) {
+    fill($('ident'), h('span', { text: 'no key to watch yet' }));
+    $('status-slot').replaceChildren();
+    return;
+  }
   const ki = s.key_info || {};
   let host = s.gateway;
   try { host = new URL(s.gateway).host; } catch { /* keep as is */ }
@@ -413,6 +436,8 @@ function renderLive() {
   let state, text;
   if (S.serverOk === false) {
     state = 'offline'; text = 'Dashboard server offline';
+  } else if (d && !d.poller) {
+    state = 'warn'; text = 'No key to watch yet';
   } else if (!d || d.poller.polling || d.poller.last_poll_at == null) {
     state = 'polling'; text = d ? 'Polling the gateway…' : 'Connecting…';
   } else {
@@ -425,13 +450,16 @@ function renderLive() {
   $('live').dataset.state = state;
   $('live-text').textContent = text;
   // aria-disabled, not disabled: a disabled button drops keyboard focus to the page
-  $('poll-now').setAttribute('aria-disabled', String(S.serverOk !== true || !d || d.poller.polling || S.pollPending));
+  $('poll-now').setAttribute('aria-disabled', String(S.serverOk !== true || !d?.poller || d.poller.polling || S.pollPending));
 }
 
 // Tab title and favicon: % used and status, or "Offline" while the keymeter server is unreachable.
 function renderTitle() {
   const s = S.data?.summary, off = S.serverOk === false;
-  if (!s && !off) return;
+  if (!s && !off) {
+    if (S.data) document.title = 'Add a key · keymeter';
+    return;
+  }
   const pct = off ? null : s.key_info?.used_pct;
   document.title = off ? 'Offline · keymeter' : `${s.status === 'OK' && pct != null ? `${Math.round(pct)}% · ` : ''}${s.status} · keymeter`;
   let tone = off ? 'critical' : statusInfo(s.status)[0];
@@ -447,6 +475,7 @@ function renderTitle() {
 }
 
 function renderEmpty(s, d) {
+  $('empty').dataset.mode = 'error';
   const [tone, ic] = statusInfo(s.status);
   const next = d.poller.next_poll_at ? tick(d.poller.next_poll_at - d.summary_time) : null;
   const msg = s.status === 'STARTING'
@@ -476,8 +505,152 @@ function renderEvents(events) {
 
 function renderFoot(d) {
   const c = d.config, p = d.poller;
+  if (!p) return void ($('foot').textContent = '');
   $('foot').textContent = `Polls every ${c.interval}s · burn-rate window ${fmtMin(c.window)} · alerts at `
     + `${Math.round(c.warn * 100)}% / ${Math.round(c.crit * 100)}% · ${p.polls} polls, ${p.fails} failed · history kept in memory for 24h`;
+}
+
+// ---------------------------------------------------------------- keys
+// The Keys dialog picks the key to watch, adds one, or forgets one. A key goes from the page to the keymeter server
+// and never comes back: the page only ever sees it masked.
+
+// POST `body` as JSON -> the server's JSON answer; an error answer throws with the server's message. Adding a key
+// polls its gateway first, which can take a while on a slow one, so this waits up to a minute.
+async function send(path, body) {
+  const ac = new AbortController(), timer = setTimeout(() => ac.abort(), 60000);
+  try {
+    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: ac.signal });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  } catch (e) {
+    throw e.name === 'AbortError' ? new Error('The keymeter server took too long to answer.') : e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function setMsg(el, text, tone = '') {
+  el.textContent = text;
+  el.className = `form-msg${tone ? ` t-${tone}` : ''}`;
+}
+
+function hostOf(url) {
+  try { return new URL(url).host; } catch { return url; }
+}
+
+function renderKeys(d) {
+  $('keys-label').textContent = d.watched ?? 'Add a key';
+  const sig = JSON.stringify([d.keys, d.watched, d.manage, d.keys_error]);
+  if (sig === S.keysSig) return;  // unchanged: keep the focus where it is
+  S.keysSig = sig;
+  const list = $('key-list');
+  list.replaceChildren(...d.keys.map(k => keyRow(k, k.name === d.watched, d.manage)));
+  if (!d.keys.length) list.append(h('li', { class: 'table-empty', text: 'No keys yet.' }));
+  $('add-section').hidden = !d.manage;
+  $('keys-note').hidden = d.manage && !d.keys_error;
+  $('keys-note').textContent = d.keys_error
+    || 'Keys can be added, picked or forgotten here only while keymeter listens on this machine alone. On this server, use `keymeter add`, `keymeter use` and `keymeter remove` in a terminal.';
+}
+
+function keyRow(k, watched, manage) {
+  const meta = [GATEWAY_LABEL[k.gateway] || k.gateway, k.key, k.url && hostOf(k.url), !k.saved && 'from KEYMETER_KEY, not saved'];
+  const pick = h('button', { class: 'key-pick', type: 'button', 'aria-pressed': String(watched), 'aria-disabled': String(!manage) },
+    h('span', { class: 'key-name' }, h('span', { text: k.name }), watched && h('span', { class: 'key-tag' }, icon('circle-check'), 'watching')),
+    h('span', { class: 'key-meta', text: meta.filter(Boolean).join(' · ') }));
+  pick.addEventListener('click', () => { if (manage && !watched) pickKey(k.name); });
+  const forget = k.saved && manage && h('button', { class: 'btn icon-btn sm', type: 'button', 'aria-label': `Forget ${k.name}`, title: `Forget ${k.name}` }, icon('trash'));
+  if (forget) forget.addEventListener('click', () => forgetKey(k.name));
+  return h('li', { class: 'key-row' }, pick, forget);
+}
+
+async function pickKey(name) {
+  setMsg($('keys-msg'), '');
+  try {
+    await send('/api/keys/select', { name });
+    $('keys-dialog').close();
+  } catch (e) {
+    setMsg($('keys-msg'), e.message, 'crit');
+  }
+  kick();
+}
+
+async function forgetKey(name) {
+  if (!confirm(`Forget the key "${name}"? keymeter stops watching it; the key itself keeps working.`)) return;
+  setMsg($('keys-msg'), '');
+  try {
+    await send('/api/keys/remove', { name });
+  } catch (e) {
+    setMsg($('keys-msg'), e.message, 'crit');
+  }
+  kick();
+}
+
+// The form that adds a key: in the Keys dialog, or in the empty card while there is no key. Built once, so what is
+// typed survives the refreshes.
+function keyForm() {
+  const gateway = h('select', { name: 'gateway' }, Object.entries(GATEWAY_LABEL).map(([v, t]) => h('option', { value: v, text: t })));
+  const key = h('input', { name: 'key', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: 'sk-…' });
+  const url = h('input', { name: 'url', type: 'text', inputmode: 'url', autocomplete: 'off', spellcheck: 'false', placeholder: 'http://localhost:4000' });
+  const name = h('input', { name: 'name', type: 'text', autocomplete: 'off', spellcheck: 'false', maxlength: 40 });
+  const field = (label, input, hint) => h('label', { class: 'field' }, h('span', {}, label, hint && h('span', { class: 'hint', text: ` ${hint}` })), input);
+  const urlField = field('Proxy URL', url, 'your LiteLLM proxy');
+  const msg = h('p', { class: 'form-msg', role: 'status' });
+  const submitText = h('span', { text: 'Check and save' });
+  const submit = h('button', { class: 'btn primary', type: 'submit' }, icon('plus'), submitText);
+  const form = h('form', { class: 'key-form', novalidate: true },
+    field('Gateway', gateway), field('API key', key), urlField, field('Name', name, 'optional'), msg, h('div', { class: 'form-actions' }, submit));
+  let force = false, busy = false;
+  const sync = () => { urlField.hidden = gateway.value !== 'litellm'; name.placeholder = gateway.value; };
+  const unforce = () => { force = false; submitText.textContent = 'Check and save'; };
+  gateway.addEventListener('change', () => { sync(); unforce(); setMsg(msg, ''); });
+  for (const el of [key, url, name]) el.addEventListener('input', unforce);
+  form.addEventListener('submit', async ev => {
+    ev.preventDefault();
+    if (busy) return;
+    if (!key.value.trim()) { setMsg(msg, 'Paste the API key first.', 'crit'); key.focus(); return; }
+    busy = true;
+    submit.setAttribute('aria-disabled', 'true');
+    setMsg(msg, 'Checking the key with the gateway (one read-only request, no tokens spent)…');
+    try {
+      const body = { gateway: gateway.value, key: key.value, url: gateway.value === 'litellm' ? url.value : '', name: name.value, force };
+      const d = await send('/api/keys/add', body);
+      if (d.ok) {
+        form.reset();
+        sync();
+        unforce();
+        setMsg(msg, '');
+        if ($('keys-dialog').open) $('keys-dialog').close();
+        kick();
+      } else {
+        force = true;
+        submitText.textContent = 'Save anyway';
+        setMsg(msg, `The gateway answered ${d.problem}. Check the gateway, the key and the URL, or save the key anyway.`, 'crit');
+      }
+    } catch (e) {
+      setMsg(msg, e.message, 'crit');
+    } finally {
+      busy = false;
+      submit.setAttribute('aria-disabled', 'false');
+    }
+  });
+  sync();
+  return form;
+}
+
+// No key to watch yet: the empty card says how to add one, and holds the form while this page may change the keys.
+function renderSetup(d) {
+  const empty = $('empty');
+  if (empty.dataset.mode === 'setup' && (!d.manage || empty.contains(S.form))) return;
+  empty.dataset.mode = 'setup';
+  empty.replaceChildren(
+    h('div', { class: 'empty-icon st-neutral' }, icon('key')),
+    h('div', { class: 'setup' },
+      h('h2', { text: 'Add a key to watch' }),
+      h('p', { text: d.manage
+        ? 'Pick the gateway and paste the key. keymeter checks it with one read-only request (no tokens spent) and saves it in your user folder; this page only ever sees it masked.'
+        : 'Add one with `keymeter add` in a terminal on this server, then reload this page.' }),
+      d.manage && S.form));
 }
 
 // ---------------------------------------------------------------- render: KPI tiles
@@ -1032,7 +1205,7 @@ function renderRange() {
         S.range = k;
         save('keymeter-range', k);
         renderRange();
-        if (S.data?.summary.key_info) renderCharts();
+        if (S.data?.summary?.key_info) renderCharts();
       }));
       return btn;
     }));
@@ -1058,6 +1231,19 @@ function init() {
   });
   $('alerts-btn').addEventListener('click', toggleAlerts);
   $('poll-now').addEventListener('click', pollNow);
+  S.form = keyForm();
+  $('add-slot').append(S.form);
+  const dialog = $('keys-dialog');
+  $('keys-btn').addEventListener('click', () => {
+    if (!S.data?.summary && S.form.isConnected && !dialog.contains(S.form)) {
+      S.form.querySelector('select').focus();  // no key yet: the form is on the page already
+      return;
+    }
+    setMsg($('keys-msg'), '');
+    dialog.showModal();
+  });
+  $('keys-close').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('click', e => { if (e.target === dialog) dialog.close(); });  // a click on the backdrop
   // browsers start audio suspended until the page gets a gesture
   document.addEventListener('pointerdown', () => audio?.resume(), { once: true });
 
