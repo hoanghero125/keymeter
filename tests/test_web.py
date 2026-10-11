@@ -221,10 +221,10 @@ def test_select_and_remove(no_key, fake_gateway):
     config.add({"name": "a", "gateway": "deepseek", "key": KEY, "url": gw.url})
     config.add({"name": "b", "gateway": "deepseek", "key": KEY, "url": gw.url})
     assert post(base, "/api/keys/select", {"name": "a"}) == (200, {"ok": True})
-    assert dash.watched == "a" and config.load()["active"] == "a"
+    assert dash.watched["name"] == "a" and config.load()["active"] == "a"
     old = dash.poller
     assert post(base, "/api/keys/remove", {"name": "a"}) == (200, {"ok": True})
-    assert dash.watched == "b" and dash.poller is not old and old.stopped.is_set()
+    assert dash.watched["name"] == "b" and dash.poller is not old and old.stopped.is_set()
     assert post(base, "/api/keys/remove", {"name": "b"}) == (200, {"ok": True})
     assert dash.watched is None and dash.poller is None
     assert post(base, "/api/keys/select", {"name": "b"}) == (400, {"error": "no saved key named 'b'"})
@@ -266,3 +266,17 @@ def test_a_big_or_odd_body_is_refused(no_key):
         s.sendall(b"POST /api/keys/add HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
                   b"Content-Length: 66560\r\n\r\n")
         assert s.makefile("rb").readline().split()[1:2] == [b"413"]
+
+
+def test_beyond_loopback_the_page_learns_nothing_of_the_other_keys(no_key, fake_gateway):
+    base, dash = no_key
+    gw = fake_gateway({"/user/balance": lambda q: (200, balance("1.00"))})
+    config.add({"name": "secret-project", "gateway": "litellm", "key": "sk-other-0123456789", "url": "http://internal.example"})
+    config.add({"name": "ds", "gateway": "deepseek", "key": KEY, "url": gw.url})
+    dash.start()
+    dash.manage = False  # as on --host 0.0.0.0
+    d = get(base, "/api/state")[2]
+    assert [k["name"] for k in d["keys"]] == ["ds"]
+    assert "secret-project" not in json.dumps(d) and "internal.example" not in json.dumps(d)
+    config.path().write_text("{damaged", encoding="utf-8")
+    assert get(base, "/api/state")[2]["keys_error"] is None  # no file paths for the network either

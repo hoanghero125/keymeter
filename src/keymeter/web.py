@@ -137,7 +137,7 @@ class Dashboard:
         self.args, self.extra = args, extra
         self.lock = threading.Lock()
         self.poller = None
-        self.watched = None    # the name of the watched key
+        self.watched = None    # the watched key's entry
         self.manage = True     # whether the page may change the keys; make_server() turns it off beyond loopback
 
     def start(self, name=None):
@@ -153,7 +153,7 @@ class Dashboard:
     def _watch(self, e):
         poller = Poller(Monitor(config.adapter(e, team=False), self.args))  # the page covers the key only
         with self.lock:
-            old, self.poller, self.watched = self.poller, poller, e["name"]
+            old, self.poller, self.watched = self.poller, poller, e
         poller.start()
         if old:
             old.stop()
@@ -185,7 +185,7 @@ class Dashboard:
 
     def remove(self, name):
         config.remove(name)
-        if name == self.watched:
+        if self.watched and name == self.watched["name"]:
             store = config.load()
             e = self.extra or config.find(store, store["active"])
             if e:
@@ -198,15 +198,20 @@ class Dashboard:
         return poller.poll_now() if poller else False
 
     def state(self, since):
-        poller = self.poller
+        with self.lock:
+            poller, watched = self.poller, self.watched
         out = poller.state(since) if poller else no_key_state(self.args)
-        try:
-            saved, out["keys_error"] = config.load()["keys"], None
-        except config.Error as e:
-            saved, out["keys_error"] = [], str(e)
-        rows = ([(self.extra, False)] if self.extra else []) + [(e, True) for e in saved]
+        out["keys_error"] = None
+        if self.manage:
+            try:
+                saved = config.load()["keys"]
+            except config.Error as e:
+                saved, out["keys_error"] = [], str(e)
+            rows = ([(self.extra, False)] if self.extra else []) + [(e, True) for e in saved]
+        else:  # beyond loopback, with no login: nothing of the other keys, nor of where they are kept
+            rows = [(watched, watched is not self.extra)] if watched else []
         out["keys"] = [{**config.public(e), "saved": is_saved} for e, is_saved in rows]
-        out["watched"] = self.watched if poller else None
+        out["watched"] = watched["name"] if watched else None
         out["manage"] = self.manage
         return out
 
@@ -262,12 +267,12 @@ class Handler(BaseHTTPRequestHandler):
         action = KEY_ACTIONS.get(url.path)
         if action is None:
             return self._json(404, {"error": "not found"})
-        if not self.dash.manage:
-            return self._json(403, {"error": "keys can be changed here only while keymeter listens on this machine alone; "
-                                             "use `keymeter add`, `keymeter use` and `keymeter remove` in a terminal"})
         body = self._body()
         if body is None:
             return
+        if not self.dash.manage:
+            return self._json(403, {"error": "keys can be changed here only while keymeter listens on this machine alone; "
+                                             "use `keymeter add`, `keymeter use` and `keymeter remove` in a terminal"})
         try:
             self._json(200, action(self.dash, body))
         except config.Error as e:
@@ -276,7 +281,16 @@ class Handler(BaseHTTPRequestHandler):
     def _body(self):
         """The JSON object a POST sent, or None once an error has been sent. Only JSON is taken, and only from this
         machine's own pages: a form on another site can't send JSON, and a script there would need CORS, which
-        keymeter doesn't answer."""
+        keymeter doesn't answer. The body is read before any refusal: a connection closed with unread data in it is
+        reset (on Windows), and the client never sees the answer."""
+        try:
+            size = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            size = -1
+        if not 0 <= size <= MAX_BODY:
+            self._json(413, {"error": f"send at most {MAX_BODY} bytes"})
+            return None
+        raw = self.rfile.read(size)
         origin = self.headers.get("Origin")
         if origin and urlparse(origin).hostname not in LOOPBACK:
             self._json(403, {"error": "requests from other sites are refused"})
@@ -285,14 +299,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(415, {"error": "send JSON"})
             return None
         try:
-            size = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            size = -1
-        if not 0 <= size <= MAX_BODY:
-            self._json(413, {"error": f"send at most {MAX_BODY} bytes"})
-            return None
-        try:
-            body = json.loads(self.rfile.read(size) or b"null")
+            body = json.loads(raw or b"null")
         except ValueError:
             body = None
         if not isinstance(body, dict):

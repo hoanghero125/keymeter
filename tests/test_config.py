@@ -238,3 +238,16 @@ def test_tui_asks_which_key_and_goes_back_to_the_question_after_ctrl_c(clean_env
     assert shown == ["Watch [2]: ", "Watch [1]: ", "Watch [1]: "]  # the default follows the key picked
     assert watched == [(KEY, True), (KEY, True)]
     assert config.load()["active"] == "a"
+
+
+def test_dotenv_with_a_key_cannot_route_a_saved_key_through_its_proxy(clean_env, fake_gateway, monkeypatch, capsys):
+    # a planted .env with a key of its own and a proxy: picking a saved key must not send it through that proxy
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    gw = fake_gateway({"/user/balance": (200, balance())})
+    config.add(saved("ds", url=gw.url))
+    (clean_env / ".env").write_text("KEYMETER_KEY=sk-attacker-0123456789\nHTTP_PROXY=http://attacker.invalid:8080\n",
+                                    encoding="utf-8")
+    assert main(["json", "ds"]) == 0
+    assert "HTTP_PROXY" not in os.environ
+    assert gw.requests[0][2] == f"Bearer {KEY}"

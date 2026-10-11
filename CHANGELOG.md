@@ -15,7 +15,10 @@
   question. `json` and `tui --once` run in a terminal without any key ask for one first; elsewhere they
   say how to add one.
 - `./.env` is read only when it sets `KEYMETER_KEY`, so a `.env` of another program in the working
-  directory no longer goes into keymeter's environment.
+  directory no longer goes into keymeter's environment, and only its `KEYMETER_KEY`, `KEYMETER_URL` and
+  `KEYMETER_GATEWAY` count: a proxy setting there (`HTTPS_PROXY`, ...) would carry the saved keys too.
+  Name the file with `--env` to have its other lines read as before.
+- Web on `--host 0.0.0.0`: the page shows only the watched key, not the other saved ones.
 - DeepSeek support (`--gateway deepseek`, or a URL on `deepseek.com`): keymeter reads the account's
   prepaid USD balance from `GET /user/balance` and shows it with the burn rate and when the balance runs
   out. The spend is what the balance went down by since keymeter started. New status `NO BALANCE` when

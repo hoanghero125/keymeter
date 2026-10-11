@@ -20,6 +20,7 @@ from keymeter.monitor import Monitor
 from keymeter.util import tidy
 
 ENV_NAME = "KEYMETER_KEY"  # the name the key from the environment goes by among the saved ones
+ENV_VARS = ("KEYMETER_KEY", "KEYMETER_URL", "KEYMETER_GATEWAY")
 NO_KEY = ("No key to watch yet. Add one with `keymeter add`, open `keymeter web` and add it there, "
           "or set KEYMETER_KEY (in the environment or a .env file).")
 
@@ -46,14 +47,15 @@ def env_lines(path):
     return lines
 
 
-def load_env(path, required):
-    """Minimal .env reader (KEY=VALUE lines); real environment variables win unless they are empty."""
+def load_env(path, required, names=None):
+    """Minimal .env reader (KEY=VALUE lines), only the variables in `names` if given; real environment variables win
+    unless they are empty."""
     if not path.is_file():
         if required:
             sys.exit(f"--env file not found: {path}")
         return
     for k, v in env_lines(path):
-        if not env(k):  # `export KEYMETER_KEY=` must not hide the file's key
+        if not env(k) and (names is None or k in names):  # `export KEYMETER_KEY=` must not hide the file's key
             os.environ[k] = v
 
 
@@ -64,10 +66,11 @@ def env_key(args):
     elif not env("KEYMETER_KEY"):
         # ./.env is only a fallback for the key itself: a .env in whatever directory you are in (a cloned repo, say)
         # must not point a key from your environment, or a saved one, at another server. One without a key belongs
-        # to some other program, so it is not read at all.
+        # to some other program, so it is not read at all, and of one with a key only the KEYMETER_ settings count:
+        # a proxy set there would carry the saved keys too, once one is picked (NAME, or the web page's Keys dialog).
         local = Path(".env")
         if local.is_file() and any(k == "KEYMETER_KEY" and v for k, v in env_lines(local)):
-            load_env(local, required=False)
+            load_env(local, required=False, names=ENV_VARS)
     key = env("KEYMETER_KEY")
     if not key:
         return None

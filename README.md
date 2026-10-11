@@ -76,7 +76,7 @@ Options (`keymeter COMMAND -h` lists them per command):
 |---|---|---|
 | `--gateway` | `auto` | `litellm`, `openrouter`, `deepseek`, or `auto` to pick from the URL's host, or from the key when no URL is set |
 | `--url` | depends on the gateway | gateway base URL; `http://localhost:4000` for LiteLLM, `https://openrouter.ai/api` for OpenRouter, `https://api.deepseek.com` for DeepSeek. A trailing `/v1` is fine, and so is a bare `https://openrouter.ai`. |
-| `--env FILE` | `.env` | where to read settings from; `./.env` is read only when `KEYMETER_KEY` is not already set in the environment and the file sets it |
+| `--env FILE` | `.env` | where to read settings from; `./.env` is read only when `KEYMETER_KEY` is not already set in the environment and the file sets it, and only for its `KEYMETER_` settings |
 | `-i`, `--interval` | `15` | seconds between polls (`web`, `tui`) |
 | `--window` | `15` | burn-rate window in minutes (`web`, `tui`) |
 | `--warn` / `--crit` | `0.8` / `0.95` | alert thresholds, as a fraction of a budget (`web`, `tui`) |
@@ -123,14 +123,15 @@ A key set this way is watched before the saved ones and shows in the web dashboa
 `$env:KEYMETER_KEY = "sk-..."`. Copy [`.env.example`](https://github.com/hoanghero125/keymeter/blob/main/.env.example)
 to `.env` to start.
 
-keymeter reads `./.env` only when `KEYMETER_KEY` is not set in the environment and the file sets it
-(a file you name with `--env` is always read). That way a `.env` in whatever directory you happen to be
-in, such as a cloned repository or another program's, can't send your key to another server.
+keymeter reads `./.env` only when `KEYMETER_KEY` is not set in the environment and the file sets it,
+and takes only the three `KEYMETER_` settings from it (a file you name with `--env` is always read,
+and whole). That way a `.env` in whatever directory you happen to be in, such as a cloned repository
+or another program's, can't send your key, or a saved one, to another server or through a proxy.
 
 There is no `--key` option, because a key typed on the command line ends up in your shell history.
 
-The file's other `NAME=value` lines go into keymeter's environment too (a variable already set there
-wins unless it is empty). Python's HTTP client takes its proxy from the environment, so `HTTPS_PROXY`,
+The other `NAME=value` lines of a file given with `--env` go into keymeter's environment too (a
+variable already set there wins unless it is empty). Python's HTTP client takes its proxy from the environment, so `HTTPS_PROXY`,
 `HTTP_PROXY` or `NO_PROXY` in the file apply to the requests to the gateway, and a proxy set that way
 can read the key when the gateway URL is plain `http://`. Pass `--env` only files you trust.
 
@@ -184,8 +185,8 @@ To keep it running after you log out, use `tmux`, a systemd service, or
 
 `keymeter web --host 0.0.0.0` serves the dashboard on every interface instead. There is no login,
 so anyone who can reach the port can see the watched key's spend, budget and model usage (not the key
-itself) and press "Poll now". The Keys dialog then only lists the keys; add, pick and forget them with
-`keymeter add`, `use` and `remove` on the server. If you do this, allow only your own IP in the firewall.
+itself) and press "Poll now". The Keys dialog then shows only the watched key, and nothing about the
+others; add, pick and forget keys with `keymeter add`, `use` and `remove` on the server. If you do this, allow only your own IP in the firewall.
 
 ## How it works
 
